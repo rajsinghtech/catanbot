@@ -1344,7 +1344,23 @@ export function heuristicScore(state: GameState, action: Action): number {
       if (o) {
         const after = afterSwap(me.hand, o.get, o.getCount, o.give, o.giveCount);
         const unlock = unlockLabel(me.hand, after);
+        const settlementMissingBefore = costDistance(me.hand, COSTS.settlement);
+        const settlementMissingAfter = costDistance(after, COSTS.settlement);
+        const settlementProgress = settlementMissingBefore - settlementMissingAfter;
         s += strategicTradeValue(state, us, me.hand, after, o.give);
+        if (funnel.active) {
+          // Player offers are the scarce-resource valve in the two-building
+          // phase. A one-card brick/sheep/wood gain can be more valuable than
+          // preserving the card the opponent requested because it turns an
+          // otherwise stalled road into the third house. The old response
+          // path mostly priced the opponent's next build and rejected these
+          // offers, leaving the bot with two houses and no expansion card.
+          if ((o.give === "wood" || o.give === "brick" || o.give === "sheep") && me.hand[o.give] < COSTS.settlement[o.give]) {
+            s += 20;
+          }
+          if (settlementProgress > 0) s += 18 + settlementProgress * 8;
+          if (canPay(after, COSTS.settlement) && settlementSpots(state, me, false).length > 0) s += 46;
+        }
         if (unlock === "city") s += 48;
         else if (unlock === "settlement") s += 36;
         else if (unlock === "dev card") s += 24;
@@ -1362,10 +1378,11 @@ export function heuristicScore(state: GameState, action: Action): number {
         if (o.give === "wheat" || o.give === "ore") s += 8;
         if ((o.get === "wheat" || o.get === "ore") && !unlock && strategicTradeValue(state, us, me.hand, after, o.give) < 8) s -= 12;
         const senderUnlock = opponentTradeUnlock(state, o);
-        if (senderUnlock === "city") s -= 36;
-        else if (senderUnlock === "settlement") s -= 28;
-        else if (senderUnlock === "dev card") s -= 18;
-        else if (senderUnlock === "road") s -= 12;
+        const ownExpansionTrade = funnel.active && settlementProgress > 0;
+        if (senderUnlock === "city") s -= ownExpansionTrade ? 14 : 36;
+        else if (senderUnlock === "settlement") s -= ownExpansionTrade ? 10 : 28;
+        else if (senderUnlock === "dev card") s -= ownExpansionTrade ? 8 : 18;
+        else if (senderUnlock === "road") s -= ownExpansionTrade ? 5 : 12;
         if (senderUnlock && opponentIsDangerous(state, o.from)) s -= 14;
         if (after[o.get] < 0) s -= 40;
       }

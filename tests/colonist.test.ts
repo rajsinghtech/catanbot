@@ -196,6 +196,30 @@ test("trade response values a scarce brick that advances a real settlement route
   assert.ok(heuristicScore(state, accept) > heuristicScore(state, reject));
 });
 
+test("two-building funnel accepts a player brick offer that fixes the expansion bottleneck", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, names: ["You", "Neighbor", "Blue", "White"], us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  me.settlements = [vertices[0], vertices.find((vertex) => vertex !== vertices[0] &&
+    !state.board.vertices[vertices[0]].edges.some((edge) => state.board.edges[edge].vertices.includes(vertex)))!];
+  me.hand = { wood: 1, brick: 0, sheep: 0, wheat: 1, ore: 1 };
+  state.pendingOffer = {
+    id: "offer-expansion-brick",
+    from: state.players[1].id,
+    give: "brick",
+    giveCount: 1,
+    get: "ore",
+    getCount: 1,
+  };
+
+  const actions = legalActions(state);
+  const accept = actions.find((action) => action.type === "ACCEPT_TRADE");
+  const reject = actions.find((action) => action.type === "REJECT_TRADE");
+  assert.ok(accept);
+  assert.ok(reject);
+  assert.ok(heuristicScore(state, accept) > heuristicScore(state, reject));
+});
+
 test("friendly robber skips an ineligible victim", () => {
   const state = newGame({ playerCount: 2, friendlyRobber: true }, { seed: 8, names: ["Alice", "Bob"] });
   const alice = state.players[0];
