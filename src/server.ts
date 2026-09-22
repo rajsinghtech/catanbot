@@ -689,6 +689,28 @@ function decisionContextFingerprint(): string {
   });
 }
 
+function debugTradeChoice(action: Action): void {
+  if (process.env.CATANBOT_DEBUG_TRADE !== "1" ||
+    (action.type !== "ACCEPT_TRADE" && action.type !== "REJECT_TRADE") ||
+    !game.pendingOffer) return;
+  const sender = game.players.find((p) => p.id === game.pendingOffer?.from);
+  console.log("trade-choice", JSON.stringify({
+    action: action.type,
+    offerId: game.pendingOffer.id,
+    from: sender?.name,
+    fromId: sender?.id,
+    fromVisibleVp: sender ? visibleVP(game, sender.id) : null,
+    fromTotalVp: sender ? totalVP(game, sender.id) : null,
+    fromSettlements: sender?.settlements.length,
+    fromCities: sender?.cities.length,
+    fromRoads: sender?.roads.length,
+    fromKnights: sender?.knightsPlayed,
+    offer: game.pendingOffer,
+    knownHand: sender?.hand,
+    unknownCards: sender?.hidden.unknown,
+  }));
+}
+
 export async function refreshRec(force = false): Promise<Recommendation> {
   reconcileTurnFromLiveApp();
   reconcilePendingIntent();
@@ -711,6 +733,7 @@ export async function refreshRec(force = false): Promise<Recommendation> {
     } catch {
       rec = waitingRec();
     }
+    debugTradeChoice(rec.action);
     lastDecisionFingerprint = decisionFingerprint();
     broadcast();
     return rec;
@@ -773,26 +796,7 @@ export async function refreshRec(force = false): Promise<Recommendation> {
           target,
         }));
       }
-      if (process.env.CATANBOT_DEBUG_TRADE === "1" &&
-        (nextRec.action.type === "ACCEPT_TRADE" || nextRec.action.type === "REJECT_TRADE") &&
-        game.pendingOffer) {
-        const sender = game.players.find((p) => p.id === game.pendingOffer?.from);
-        console.log("trade-choice", JSON.stringify({
-          action: nextRec.action.type,
-          offerId: game.pendingOffer.id,
-          from: sender?.name,
-          fromId: sender?.id,
-          fromVisibleVp: sender ? visibleVP(game, sender.id) : null,
-          fromTotalVp: sender ? totalVP(game, sender.id) : null,
-          fromSettlements: sender?.settlements.length,
-          fromCities: sender?.cities.length,
-          fromRoads: sender?.roads.length,
-          fromKnights: sender?.knightsPlayed,
-          offer: game.pendingOffer,
-          knownHand: sender?.hand,
-          unknownCards: sender?.hidden.unknown,
-        }));
-      }
+      debugTradeChoice(nextRec.action);
       const afterFingerprint = decisionFingerprint();
       const afterContextFingerprint = decisionContextFingerprint();
       const contextStable = afterContextFingerprint === contextFingerprint;

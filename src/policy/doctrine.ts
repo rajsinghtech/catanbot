@@ -981,7 +981,12 @@ export function longestRoadPlanScore(state: GameState, action: Action): LongestR
   if (state.longestRoad === us && opponentLength < beforeLength) {
     return { ...noPlan, immediateLength, bestLength: immediateLength, value: -22 };
   }
-  const nearRace = beforeLength >= 3 || opponentLength >= 4 || state.longestRoad === us;
+  // A bridge can be the strongest Longest Road move even when neither
+  // component is long by itself. If the first edge increases the longest path
+  // by more than one, it joined two of our own road islands; always search that
+  // race instead of dismissing it behind the old component-length gate.
+  const bridgeMove = immediateLength > beforeLength + 1;
+  const nearRace = beforeLength >= 3 || opponentLength >= 4 || state.longestRoad === us || bridgeMove;
   if (!nearRace && immediateLength < target) return noPlan;
 
   const needsImmediateSecurity =

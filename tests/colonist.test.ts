@@ -5,7 +5,7 @@ import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
 import { newGame, legalActions, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
-import { forcedWin, heuristicScore, roadExpansionScore, roadOpenSettlementTarget, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
+import { forcedWin, heuristicScore, longestRoadPlanScore, roadExpansionScore, roadOpenSettlementTarget, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
 import { decide } from "../src/policy/jev.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
@@ -664,6 +664,35 @@ test("a road ending at an opponent settlement is treated as a dead zone", () => 
   assert.ok(endTurn);
   assert.ok(roadExpansionScore(state, road) < 0);
   assert.ok(heuristicScore(state, road) < heuristicScore(state, endTurn));
+});
+
+test("Longest Road planner values a bridge between two short road islands", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  me.settlements = [
+    "-1,-1|-1,-2|0,-2",
+    "1,-2|2,-2|2,-3",
+  ];
+  me.roads = [
+    "-1,-1|0,-1|0,-2|0,-1|0,-2|1,-2",
+    "-1,-1|-1,-2|0,-2|-1,-1|0,-1|0,-2",
+    "0,-2|1,-2|1,-3|1,-2|1,-3|2,-3",
+    "1,-2|1,-3|2,-3|1,-2|2,-2|2,-3",
+  ];
+  me.hand = { wood: 1, brick: 1, sheep: 0, wheat: 0, ore: 0 };
+  state.phase = "turn";
+  state.current = me.id;
+  const bridge = legalActions(state).find((action) =>
+    action.type === "BUILD_ROAD" && action.edge === "0,-1|0,-2|1,-2|0,-2|1,-2|1,-3",
+  );
+  assert.ok(bridge);
+  const plan = longestRoadPlanScore(state, bridge);
+  assert.equal(plan.immediateLength, 5);
+  assert.equal(plan.claimNow, true);
+  assert.equal(plan.secureNow, true);
+  const endTurn = legalActions(state).find((action) => action.type === "END_TURN");
+  assert.ok(endTurn);
+  assert.ok(heuristicScore(state, bridge) > heuristicScore(state, endTurn));
 });
 
 test("a bounded open settlement route can justify an approach road with one spare road card", () => {
