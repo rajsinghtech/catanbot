@@ -1311,7 +1311,7 @@ export function heuristicScore(state: GameState, action: Action): number {
       // with three cities, no settlement, and no wood/sheep to re-expand.
       const openHouse = settlementSpots(state, me, false).length > 0;
       const directCityWin = totalVP(state, us) + 1 >= state.config.victoryPoints;
-      if (me.settlements.length === 1 && me.cities.length >= 2 && openHouse && !directCityWin) {
+      if (me.settlements.length === 1 && me.cities.length >= 1 && openHouse && !directCityWin) {
         s -= 24;
         if (bestReachableSettlementValue(state, us) > 0) s -= 18;
       }
@@ -1588,17 +1588,19 @@ export function heuristicScore(state: GameState, action: Action): number {
       const d = action.discard ?? {};
       s += 5;
       const nearWinExpansion = me.settlements.length === 0 && totalVP(state, us) >= state.config.victoryPoints - 1;
+      const preserveLastExpansion = me.settlements.length <= 1 && me.cities.length > 0 && settlementSpots(state, me, true).length > 0;
       for (const r of RESOURCES) {
         const n = d[r] ?? 0;
-        if (nearWinExpansion) {
+        if (nearWinExpansion || preserveLastExpansion) {
           // A player with only cities can still win the final point through a
-          // new settlement, but only if wood/brick/sheep/wheat survive the
-          // discard. Ore is useful for cities, not for that emergency route;
-          // when the player is one point away, discard ore before the cards
-          // that can be converted into a house after Road Building or a port
-          // trade.
+          // new settlement, and a one-settlement city engine still needs an
+          // expansion anchor. Both routes require wood/brick/sheep/wheat to
+          // survive the discard. Ore is useful for cities, not for the next
+          // house; discard it before the cards that can be converted into a
+          // settlement after Road Building or a port trade.
           if (r === "ore") s += n * 5;
-          else s -= n * 7;
+          else if (r === "wheat") s -= n * 6;
+          else s -= n * 8;
         } else if (r === "wheat" || r === "ore") s -= n * 3;
         else s -= n;
       }
