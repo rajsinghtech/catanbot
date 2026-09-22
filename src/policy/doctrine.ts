@@ -1296,9 +1296,20 @@ export function heuristicScore(state: GameState, action: Action): number {
           if (res === "wheat" || res === "ore") s += pips * 3;
         }
       }
+      // A city is only +1 VP and it consumes the settlement that anchors a
+      // future expansion. Once the player is down to one settlement, do not
+      // automatically turn it into a third/fourth city when an open house
+      // route still exists; that was the live failure where the bot ended up
+      // with three cities, no settlement, and no wood/sheep to re-expand.
+      const openHouse = settlementSpots(state, me, false).length > 0;
+      const directCityWin = totalVP(state, us) + 1 >= state.config.victoryPoints;
+      if (me.settlements.length === 1 && me.cities.length >= 2 && openHouse && !directCityWin) {
+        s -= 24;
+        if (bestReachableSettlementValue(state, us) > 0) s -= 18;
+      }
       break;
     }
-    case "BUY_DEV":
+    case "BUY_DEV": {
       s += 18;
       if (myProd.ore + myProd.wheat + myProd.sheep >= 10) s += 8;
       if (me.knightsPlayed >= 2) s += 12;
@@ -1308,6 +1319,15 @@ export function heuristicScore(state: GameState, action: Action): number {
       // the hand happens to contain sheep-wheat-ore.
       if (settlementSpots(state, me, false).length === 0) s += 8;
       if (endgame) s += 10;
+      // A development card consumes wheat/sheep/ore. If the hand is already
+      // one card from a city, buying a card is usually a self-inflicted tempo
+      // loss: hold the conversion hand for the next roll/trade instead. This
+      // is especially important after the third settlement, where the old
+      // policy repeatedly bought devs while sitting one ore or wheat short.
+      const cityMissing = costDistance(me.hand, COSTS.city);
+      if (me.settlements.length > 0 && cityMissing <= 1) s -= 42;
+      else if (me.settlements.length > 0 && cityMissing <= 2) s -= 24;
+      else if (me.settlements.length > 0 && cityMissing <= 3 && myProd.wheat + myProd.ore >= 7) s -= 14;
       if (funnel.active) {
         // A dev card is a secondary conversion while the player still has
         // only the opening pair.  In particular, spending sheep/wheat/ore
@@ -1319,6 +1339,7 @@ export function heuristicScore(state: GameState, action: Action): number {
         else if (funnel.missing <= 3) s -= 12;
       }
       break;
+    }
     case "PLAY_KNIGHT": {
       s += 12;
       const strongestOpponent = opp
@@ -1355,15 +1376,24 @@ export function heuristicScore(state: GameState, action: Action): number {
               if (pl.id === us) ours += n * pips;
             else {
               const pressure = res ? resourcePressure(state, pl.id, res) : 0;
+              const rivalProduction = res ? production(state, pl.id)[res] : 0;
+              const dangerous = opponentIsDangerous(state, pl.id);
               theirs += n * pips * (res === "wheat" || res === "ore" ? 1.4 : 1) * (1 + pressure * 0.42);
               if (pressure >= 1.5) s += n * 4;
               // A hidden hand is not evidence that a visible 8/10-point
               // opponent has nothing. When the robber can interrupt that
               // opponent's productive tile, denial is worth more than the
               // ordinary pip/steal estimate.
-              if (opponentIsDangerous(state, pl.id)) {
-                theirs += n * pips * 3;
-                s += n * 10;
+              if (dangerous) {
+                // Prefer the resource that actually powers the opponent's
+                // next build. The prior multiplier mostly selected the
+                // highest-pip tile, even when it ignored a Longest Road
+                // holder's brick/wood engine.
+                theirs += n * pips * (3 + rivalProduction * 0.85);
+                if (state.longestRoad === pl.id && (res === "wood" || res === "brick")) {
+                  theirs += n * pips * 2.5;
+                }
+                s += n * (10 + rivalProduction * 2.5);
               }
             }
           }
@@ -1467,10 +1497,15 @@ export function heuristicScore(state: GameState, action: Action): number {
       if (give && get) {
         const after = afterSwap(me.hand, give, n, get, 1);
         const unlock = unlockLabel(me.hand, after);
+        const cityProgress = costDistance(me.hand, COSTS.city) - costDistance(after, COSTS.city);
         if (unlock === "city") s += 44;
         else if (unlock === "settlement") s += 34;
         else if (unlock === "dev card") s += 22;
         else if (unlock === "road") s += 14;
+        if (cityProgress > 0) s += cityProgress * 18;
+        if (me.settlements.length > 0 && costDistance(me.hand, COSTS.city) <= 2 && (get === "wheat" || get === "ore")) {
+          s += 12;
+        }
         if (funnel.active) {
           if (unlock === "settlement") s += 26;
           else if (unlock === "road") s += 22;
@@ -1535,6 +1570,11 @@ export function heuristicScore(state: GameState, action: Action): number {
     case "END_TURN":
       s -= 2;
       if (handSize(me) > state.config.discardLimit) s -= 15;
+      if (handSize(me) <= state.config.discardLimit && me.settlements.length > 0) {
+        const cityMissing = costDistance(me.hand, COSTS.city);
+        if (cityMissing <= 1) s += 22;
+        else if (cityMissing <= 2) s += 10;
+      }
       break;
     case "DISCARD": {
       const d = action.discard ?? {};

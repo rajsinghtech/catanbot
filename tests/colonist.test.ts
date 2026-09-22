@@ -396,6 +396,23 @@ test("Year of Plenty completes a city hinge after expansion", () => {
   assert.ok(heuristicScore(state, wheatWheat) > heuristicScore(state, woodSheep));
 });
 
+test("holds a near-city hand instead of buying a development card", () => {
+  const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const settlement = Object.keys(state.board.vertices)[0];
+  me.settlements = [settlement];
+  me.hand = { wood: 0, brick: 0, sheep: 1, wheat: 2, ore: 2 };
+  state.phase = "turn";
+  state.current = me.id;
+  state.turn = 1;
+
+  const buyDev = legalActions(state).find((action) => action.type === "BUY_DEV");
+  const endTurn = legalActions(state).find((action) => action.type === "END_TURN");
+  assert.ok(buyDev);
+  assert.ok(endTurn);
+  assert.ok(heuristicScore(state, endTurn) > heuristicScore(state, buyDev));
+});
+
 test("the expansion funnel trades toward a road instead of a dev-card unlock", () => {
   const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
   const me = state.players[0];
