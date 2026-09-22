@@ -5,7 +5,7 @@ import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
 import { newGame, legalActions, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
-import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, roadBuildingHasStrategicProof, roadExpansionScore, roadOpenSettlementTarget, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
+import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, roadBuildingHasStrategicProof, roadExpansionScore, roadOpenSettlementTarget, roadReservesExpansionLane, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
 import { decide } from "../src/policy/jev.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
@@ -804,6 +804,32 @@ test("a bounded open settlement route can justify an approach road with one spar
     .find(({ target }) => target.value > 45 && target.depth <= 2);
   assert.ok(road);
   assert.equal(road.target.contested, false);
+});
+
+test("a supported uncontested lane stays reserved before the settlement is payable", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 1, us: "red" });
+  const me = state.players[0];
+  me.settlements = ["0,-1|0,-2|1,-2"];
+  me.cities = ["0,-2|0,-3|1,-3"];
+  me.roads = [
+    "0,-1|0,-2|1,-2|0,-2|1,-2|1,-3",
+    "0,-2|0,-3|1,-3|0,-2|1,-2|1,-3",
+  ];
+  // The next house is not payable, but there are enough road cards and
+  // production support to reserve a valuable, uncontested two-road lane.
+  me.hand = { wood: 3, brick: 3, sheep: 1, wheat: 1, ore: 0 };
+  state.phase = "turn";
+  state.current = me.id;
+
+  const road = legalActions(state)
+    .filter((action) => action.type === "BUILD_ROAD")
+    .find((action) => roadReservesExpansionLane(state, action));
+  assert.ok(road);
+  const target = roadOpenSettlementTarget(state, road, 3);
+  assert.equal(target.contested, false);
+  assert.ok(target.value >= 45);
+  assert.ok(target.depth <= 2);
+  assert.ok(heuristicScore(state, road) > heuristicScore(state, legalActions(state).find((action) => action.type === "END_TURN")!));
 });
 
 test("a one-card house route beats buying a development card in the opening funnel", () => {

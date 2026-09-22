@@ -832,6 +832,88 @@ export function roadOpenSettlementTarget(
 }
 
 /**
+ * A good competitive road is sometimes a reservation, not an immediate
+ * house. It claims an uncontested lane to a valuable intersection so the
+ * next road/roll/trade can convert it before an opponent does. This proof is
+ * intentionally narrower than a generic frontier score: it must point to a
+ * real open target within two future paid roads, have a resource-supported
+ * conversion path, and not be a direct-build opportunity in disguise.
+ */
+export function roadReservesExpansionLane(state: GameState, action: Action): boolean {
+  return doctrineMemo(state, `reserve-lane:${action.id}:${action.edge ?? ""}`, () => {
+    if (action.type !== "BUILD_ROAD" || state.phase === "road_building" || !action.edge) return false;
+    const me = player(state, action.player);
+    const buildingCount = me.settlements.length + me.cities.length;
+    const target = state.config.victoryPoints;
+
+    if (
+      me.settlements.length === 0 ||
+      me.settlements.length >= 5 ||
+      buildingCount >= 9 ||
+      me.roads.length >= 7 ||
+      totalVP(state, action.player) >= target - 1
+    ) return false;
+
+    // A direct legal house is the conversion we are reserving the lane for;
+    // spending its cards on a road is never the preferred reservation.
+    if (canPay(me.hand, COSTS.settlement) && settlementSpots(state, me, false).length > 0) return false;
+    const cityPayable = canPay(me.hand, COSTS.city);
+    // A city is a concrete VP/production conversion. Even with one
+    // settlement left, reserve the lane only before the city hinge is
+    // payable; the last-anchor heuristic below still protects the settlement
+    // when the city is not yet available.
+    if (cityPayable) return false;
+
+    const openTarget = roadOpenSettlementTarget(state, action, 3);
+    if (
+      openTarget.contested ||
+      openTarget.value < 45 ||
+      !Number.isFinite(openTarget.depth) ||
+      openTarget.depth > 2
+    ) return false;
+
+    const roadScore = roadExpansionScore(state, action);
+    if (roadScore < 18) return false;
+
+    // There must be an actual bounded route, not just a valuable vertex in a
+    // graph search. Resource support may come from current production/ports;
+    // it need not mean the settlement is payable this exact turn.
+    const routeValue = openTarget.depth === 0
+      ? openTarget.value
+      : openTarget.depth === 1
+        ? settlementRouteAfterTwoRoads(state, action)
+        : settlementRouteAfterThreeRoads(state, action);
+    const routeSupported = openTarget.depth === 0 ||
+      settlementRouteHasResourceSupport(state, action, Math.min(3, openTarget.depth + 1));
+    if (routeValue < 45 && !routeSupported) return false;
+
+    // Reserve a lane only when the road cards can plausibly be replenished.
+    // Production is deliberately enough here: this is a plan over several
+    // turns, not a claim that the whole route is already in hand.
+    const prod = production(state, action.player);
+    const roadSupply = me.hand.wood + me.hand.brick >= 3 ||
+      prod.wood + prod.brick > 0 ||
+      (me.hand.wood >= 1 && prod.brick > 0) ||
+      (me.hand.brick >= 1 && prod.wood > 0);
+    if (!roadSupply) return false;
+
+    // If an opponent is already one visible conversion from winning, a
+    // multi-road reservation is too slow. Immediate denial/award logic still
+    // runs above this helper and can choose a road for the right reason.
+    const opponentNearWin = state.players
+      .filter((opponent) => opponent.id !== action.player)
+      .some((opponent) => opponentIsDangerous(state, opponent.id));
+    if (opponentNearWin && openTarget.depth > 0) return false;
+
+    // A last settlement plus a city is the important case from the live loss:
+    // before the city hinge is payable, do not spend the final expansion
+    // anchor's road cards on an unsecured branch. Other expansion shapes use
+    // the same bounded proof and also yield to a direct city above.
+    return true;
+  });
+}
+
+/**
  * Score the first edge of a Road Building pair by the best legal second edge
  * it enables.  A greedy first-edge score routinely chose a pretty branch that
  * left the second free road disconnected from the next house.  The pair is a
@@ -2179,8 +2261,9 @@ export function heuristicScore(state: GameState, action: Action): number {
           me.roads.length < 9;
         const cityPayableNow = canPay(me.hand, COSTS.city);
         const immediateHouseAfterRoad = settlementRouteCanPayAfterRoads(state, action, 1);
-        const anchorFrontier = preserveLastSettlement && roadValue >= 24 &&
-          (!cityPayableNow || immediateHouseAfterRoad);
+        const reservesExpansionLane = roadReservesExpansionLane(state, action);
+        const anchorFrontier = (preserveLastSettlement && roadValue >= 24 &&
+          (!cityPayableNow || immediateHouseAfterRoad)) || reservesExpansionLane;
         // Roads are an investment, not a default resource sink. Once the
         // player has a network of four or more, make the policy prove that
         // the next edge creates a real settlement route or a defensible LR
@@ -2302,6 +2385,7 @@ export function heuristicScore(state: GameState, action: Action): number {
       const anchorRoadAvailable = legalActions(state)
         .filter((candidate) => candidate.type === "BUILD_ROAD")
         .some((candidate) => {
+          if (roadReservesExpansionLane(state, candidate)) return true;
           if (roadExpansionScore(state, candidate) < 28) return false;
           // If a city is already payable, only suppress it for an expansion
           // road when that exact road exposes a house we can pay now. A

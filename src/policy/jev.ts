@@ -12,6 +12,7 @@ import {
   roadExpansionScore,
   roadBuildingHasStrategicProof,
   roadOpenSettlementTarget,
+  roadReservesExpansionLane,
   settlementPairScore,
   settlementRouteAfterRoad,
   settlementRouteAfterTwoRoads,
@@ -450,6 +451,15 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
     // wood/brick lane, and no immediately payable city. This is deliberately
     // topology-based so an opponent settlement remains a hard stop rather
     // than becoming a fake Longest Road invitation.
+    return true;
+  }
+
+  const reservesExpansionLane = roadReservesExpansionLane(state, action);
+  const lastSettlementAnchor = (me?.settlements.length ?? 0) === 1 && (me?.cities.length ?? 0) >= 1;
+  if (reservesExpansionLane && (!cityPayableNow || lastSettlementAnchor)) {
+    // Keep a real, supported two-road lane alive even when the house is not
+    // payable yet. This is the competitive reservation move: the road owns
+    // the approach now, while the next roll/trade supplies the house cards.
     return true;
   }
 
