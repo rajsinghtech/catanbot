@@ -14,6 +14,48 @@ import {
 import { production } from "../engine/features.ts";
 import { resourceOf } from "../engine/map.ts";
 
+type DoctrineMemo = {
+  signature: string;
+  values: Map<string, unknown>;
+};
+
+const doctrineMemos = new WeakMap<GameState, DoctrineMemo>();
+
+function doctrineStateSignature(state: GameState): string {
+  return [
+    state.phase,
+    state.current,
+    state.turn,
+    state.robberHex,
+    state.pendingOffer?.id ?? "",
+    ...state.players.map((p) => [
+      p.id,
+      p.hand.wood,
+      p.hand.brick,
+      p.hand.sheep,
+      p.hand.wheat,
+      p.hand.ore,
+      p.settlements.join(","),
+      p.cities.join(","),
+      p.roads.join(","),
+      p.knightsPlayed,
+    ].join(":")),
+  ].join("|");
+}
+
+function doctrineMemo<T>(state: GameState, key: string, compute: () => T): T {
+  const signature = doctrineStateSignature(state);
+  let memo = doctrineMemos.get(state);
+  if (!memo || memo.signature !== signature) {
+    memo = { signature, values: new Map() };
+    doctrineMemos.set(state, memo);
+  }
+  if (memo.values.has(key)) return memo.values.get(key) as T;
+  const value = compute();
+  memo.values.set(key, value);
+  return value;
+}
+
 export function canPay(h: Hand, cost: Hand): boolean {
   return RESOURCES.every((r) => h[r] >= cost[r]);
 }
@@ -242,7 +284,7 @@ function newReachableSettlementValue(state: GameState, id: string, before: Set<s
  * settlement so this phase is treated as a conversion problem rather than a
  * raw road race.
  */
-export function settlementRouteAfterRoad(state: GameState, action: Action): number {
+function settlementRouteAfterRoadUncached(state: GameState, action: Action): number {
   if (action.type !== "BUILD_ROAD" || !action.edge) return 0;
   const after = cloneState(state);
   const p = player(after, action.player);
@@ -254,13 +296,18 @@ export function settlementRouteAfterRoad(state: GameState, action: Action): numb
   return bestReachableSettlementValue(after, action.player);
 }
 
+export function settlementRouteAfterRoad(state: GameState, action: Action): number {
+  return doctrineMemo(state, `route1:${action.id}:${action.edge ?? ""}`, () =>
+    settlementRouteAfterRoadUncached(state, action));
+}
+
 /**
  * A first approach road can be strategically correct even when it does not
  * expose a settlement immediately. Look one legal road farther, but only on
  * the bounded frontier created by the candidate; this keeps the live policy
  * fast while avoiding the old one-ply road veto.
  */
-function settlementRouteAfterRoads(state: GameState, action: Action, maxRoads: number): number {
+function settlementRouteAfterRoadsUncached(state: GameState, action: Action, maxRoads: number): number {
   if (action.type !== "BUILD_ROAD" || !action.edge) return 0;
   try {
     // Only count intersections opened by this candidate. Using the whole
@@ -300,6 +347,11 @@ function settlementRouteAfterRoads(state: GameState, action: Action, maxRoads: n
   }
 }
 
+function settlementRouteAfterRoads(state: GameState, action: Action, maxRoads: number): number {
+  return doctrineMemo(state, `route:${maxRoads}:${action.id}:${action.edge ?? ""}`, () =>
+    settlementRouteAfterRoadsUncached(state, action, maxRoads));
+}
+
 /**
  * The route value above intentionally ignores hand shape so it can compare
  * future intersections. The live decision guard also needs a harder proof:
@@ -308,7 +360,7 @@ function settlementRouteAfterRoads(state: GameState, action: Action, maxRoads: n
  * into a pretty road chain, spend two or three pairs, and still have no
  * house—the repeated two-settlement loss pattern.
  */
-export function settlementRouteCanPayAfterRoads(state: GameState, action: Action, maxRoads: number): boolean {
+function settlementRouteCanPayAfterRoadsUncached(state: GameState, action: Action, maxRoads: number): boolean {
   if (action.type !== "BUILD_ROAD" || !action.edge) return false;
   try {
     const beforeReachable = new Set(settlementSpots(state, player(state, action.player), false));
@@ -348,6 +400,11 @@ export function settlementRouteCanPayAfterRoads(state: GameState, action: Action
   return false;
 }
 
+export function settlementRouteCanPayAfterRoads(state: GameState, action: Action, maxRoads: number): boolean {
+  return doctrineMemo(state, `payroute:${maxRoads}:${action.id}:${action.edge ?? ""}`, () =>
+    settlementRouteCanPayAfterRoadsUncached(state, action, maxRoads));
+}
+
 /**
  * A settlement route can be strategically live before its last card is in
  * hand. The old road guard treated "not payable this instant" as "not a
@@ -356,7 +413,7 @@ export function settlementRouteCanPayAfterRoads(state: GameState, action: Action
  * card has a visible production or port source; this is still a concrete
  * conversion proof, not a generic invitation to chase Longest Road.
  */
-export function settlementRouteHasResourceSupport(
+function settlementRouteHasResourceSupportUncached(
   state: GameState,
   action: Action,
   maxRoads: number,
@@ -413,6 +470,15 @@ export function settlementRouteHasResourceSupport(
     return false;
   }
   return false;
+}
+
+export function settlementRouteHasResourceSupport(
+  state: GameState,
+  action: Action,
+  maxRoads: number,
+): boolean {
+  return doctrineMemo(state, `supportroute:${maxRoads}:${action.id}:${action.edge ?? ""}`, () =>
+    settlementRouteHasResourceSupportUncached(state, action, maxRoads));
 }
 
 export function settlementRouteAfterTwoRoads(state: GameState, action: Action): number {
@@ -473,7 +539,7 @@ function vertexOwner(state: GameState, vertex: string): string | undefined {
  * This is deliberately a small bounded graph search so it stays cheap on the
  * live 19-hex board.
  */
-export function roadExpansionScore(state: GameState, action: Action): number {
+function roadExpansionScoreUncached(state: GameState, action: Action): number {
   if (!action.edge || !state.board.edges[action.edge]) return -Infinity;
   const beforePlayer = player(state, action.player);
   const edge = state.board.edges[action.edge];
@@ -628,6 +694,11 @@ export function roadExpansionScore(state: GameState, action: Action): number {
   return score;
 }
 
+export function roadExpansionScore(state: GameState, action: Action): number {
+  return doctrineMemo(state, `road:${action.id}:${action.edge ?? ""}`, () =>
+    roadExpansionScoreUncached(state, action));
+}
+
 function openSettlementVertex(state: GameState, vertex: string): boolean {
   if (!state.board.vertices[vertex] || vertexOwner(state, vertex)) return false;
   for (const edgeId of state.board.vertices[vertex].edges) {
@@ -646,7 +717,7 @@ function openSettlementVertex(state: GameState, vertex: string): boolean {
  * narrower topology fact so a short, well-supported approach is distinguishable
  * from a branch that merely has a high raw road score.
  */
-export function roadOpenSettlementTarget(
+function roadOpenSettlementTargetUncached(
   state: GameState,
   action: Action,
   maxFutureRoads = 3,
@@ -705,6 +776,15 @@ export function roadOpenSettlementTarget(
     }
   }
   return best;
+}
+
+export function roadOpenSettlementTarget(
+  state: GameState,
+  action: Action,
+  maxFutureRoads = 3,
+): { value: number; depth: number; contested: boolean } {
+  return doctrineMemo(state, `opentarget:${maxFutureRoads}:${action.id}:${action.edge ?? ""}`, () =>
+    roadOpenSettlementTargetUncached(state, action, maxFutureRoads));
 }
 
 /**

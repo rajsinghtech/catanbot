@@ -407,6 +407,35 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
   const buildingCount = (me?.settlements.length ?? 0) + (me?.cities.length ?? 0);
   const roadCount = me?.roads.length ?? 0;
   const gap = settlementGapAfterRoad(state, action);
+  const cityPayableNow = Boolean(me && canPay(me.hand, COSTS.city));
+  const expansionPhase = buildingCount === 2 || (
+    (me?.settlements.length ?? 0) >= 2 &&
+    (me?.settlements.length ?? 0) < 5
+  );
+  const openTarget = roadOpenSettlementTarget(state, action, 3);
+  const expansionCardsCanReplenish = Boolean(me && (me.hand.wood >= 2 || me.hand.brick >= 2));
+  const quickRoadScore = roadExpansionScore(state, action);
+  const openTargetApproach = expansionPhase &&
+    roadCount < 5 &&
+    openTarget.value >= 45 &&
+    openTarget.depth <= 2 &&
+    quickRoadScore >= 18 &&
+    (!openTarget.contested || openTarget.depth === 0 || quickRoadScore >= 45) &&
+    !cityPayableNow &&
+    gap <= 4 &&
+    expansionCardsCanReplenish;
+  if (openTargetApproach) {
+    // A candidate can be the right first edge even when the next road cards
+    // are not in hand yet. Require a bounded open house, a replenishable
+    // wood/brick lane, and no immediately payable city. This is deliberately
+    // topology-based so an opponent settlement remains a hard stop rather
+    // than becoming a fake Longest Road invitation.
+    return true;
+  }
+
+  // Only run the deeper route forecasts after the cheap, board-aware open
+  // target check above. These searches are useful for a committed route, but
+  // doing all of them for every legal road was the main live latency spike.
   const oneRoadRoute = settlementRouteAfterRoad(state, action);
   const twoRoadRoute = settlementRouteAfterTwoRoads(state, action);
   const threeRoadRoute = settlementRouteAfterThreeRoads(state, action);
@@ -419,7 +448,6 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
   const fourRoadPayable = roadCount >= 3 && threeRoadRoute < 70
     ? settlementRouteCanPayAfterRoads(state, action, 4)
     : false;
-  const cityPayableNow = Boolean(me && canPay(me.hand, COSTS.city));
   const oneRoadSupported = settlementRouteHasResourceSupport(state, action, 1);
   const twoRoadSupported = settlementRouteHasResourceSupport(state, action, 2);
   const anchorExpansion = (me?.settlements.length ?? 0) === 1 &&
@@ -436,29 +464,6 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
     (oneRoadRoute > 0 || twoRoadRoute >= 70 || threeRoadRoute >= 70) &&
     roadExpansionScore(state, action) >= 24 &&
     (!cityPayableNow || oneRoadPayable);
-  const expansionPhase = buildingCount === 2 || (
-    (me?.settlements.length ?? 0) >= 2 &&
-    (me?.settlements.length ?? 0) < 5
-  );
-  const openTarget = roadOpenSettlementTarget(state, action, 3);
-  const expansionCardsCanReplenish = Boolean(me && (me.hand.wood >= 2 || me.hand.brick >= 2));
-  const openTargetApproach = expansionPhase &&
-    roadCount < 5 &&
-    openTarget.value >= 45 &&
-    openTarget.depth <= 2 &&
-    roadExpansionScore(state, action) >= 18 &&
-    (!openTarget.contested || openTarget.depth === 0 || roadExpansionScore(state, action) >= 45) &&
-    !cityPayableNow &&
-    gap <= 4 &&
-    (expansionCardsCanReplenish || oneRoadSupported || twoRoadSupported);
-  if (openTargetApproach) {
-    // A candidate can be the right first edge even when the next road cards
-    // are not in hand yet. Require a bounded open house, a replenishable
-    // wood/brick lane, and no immediately payable city. This is deliberately
-    // topology-based so an opponent settlement remains a hard stop rather
-    // than becoming a fake Longest Road invitation.
-    return true;
-  }
   if (expansionPhase && settlementRouteAfterRoad(state, action) > 0 && canPaySettlementAfterRoad(state, action) && oneRoadPayable) {
     return true;
   }
