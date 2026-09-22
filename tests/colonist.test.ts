@@ -482,6 +482,29 @@ test("the expansion funnel trades toward a road instead of a dev-card unlock", (
   assert.ok(heuristicScore(state, oreToBrick) > heuristicScore(state, oreToSheep));
 });
 
+test("after the third building, a surplus road card converts into the city engine", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  me.settlements = vertices.slice(0, 3);
+  me.cities = [vertices[3]];
+  me.roads = Object.keys(state.board.edges).slice(0, 4);
+  me.hand = { wood: 0, brick: 4, sheep: 0, wheat: 2, ore: 2 };
+  state.phase = "turn";
+  state.current = me.id;
+  state.turn = 1;
+
+  const brickToOre = legalActions(state).find((action) =>
+    action.type === "MARITIME_TRADE" && action.give === "brick" && action.get === "ore",
+  );
+  const brickToWood = legalActions(state).find((action) =>
+    action.type === "MARITIME_TRADE" && action.give === "brick" && action.get === "wood",
+  );
+  assert.ok(brickToOre);
+  assert.ok(brickToWood);
+  assert.ok(heuristicScore(state, brickToOre) > heuristicScore(state, brickToWood));
+});
+
 test("a one-card house route beats buying a development card in the opening funnel", () => {
   const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
   const me = state.players[0];

@@ -258,14 +258,12 @@ function thirdSettlementFunnel(state: GameState, id: string): {
   const me = player(state, id);
   // A city replaces a settlement in the state arrays, but it does not erase
   // the two-building opening milestone. Keep the funnel active at one house
-  // plus one city as well, and while at least two settlements remain: a city
-  // must not authorize a dev-card loop while the next house is still the
-  // fastest catch-up route.
+  // plus one city as well. Once a third building exists, switch to the
+  // city/development engine: continuing to value every fourth/fifth house as
+  // an opening expansion made the bot trade a brick surplus into wood/sheep
+  // while opponents converted wheat/ore into the final VP race.
   const buildingCount = me.settlements.length + me.cities.length;
-  const active = buildingCount === 2 || (
-    me.settlements.length >= 2 &&
-    me.settlements.length < 5
-  );
+  const active = buildingCount === 2;
   if (!active) {
     return { active: false, missing: 99, cityMissing: 99, reachableValue: 0, bestRoadRoute: 0 };
   }
@@ -856,7 +854,7 @@ export function setupSecondSettlementScore(state: GameState, id: string, vertex:
   // opening, however, a wheat-heavy first pick plus a no-ore second pick can
   // strand the player in a low-VP trade loop, so price a viable ore corner
   // when one remains.
-  if (before.ore <= 0 && after.ore > 0) score += 18;
+  if (before.ore <= 0 && after.ore > 0) score += after.sheep > 0 ? 36 : 18;
   if (after.ore <= 0) {
     const oreOptionExists = settlementSpots(sim, player(sim, id), true).some(
       (spot) => localPips(sim, spot, "ore") > 0,
@@ -1644,6 +1642,16 @@ export function heuristicScore(state: GameState, action: Action): number {
           if (progress > 0) s += 20 + progress * 12;
           if (canPay(after, COSTS.settlement) && settlementSpots(state, me, false).length > 0) s += 48;
           if (progress <= 0 && funnel.reachableValue <= 0 && funnel.bestRoadRoute <= 0) s -= 10;
+
+          // After three paid roads, a 4:1 trade that only produces the
+          // next road card is usually a dead-end: it spends the wheat that
+          // completes the house while the network still has no payable
+          // settlement. Hold the cards for a roll/city route instead of
+          // repeating the old trade -> road -> empty-hand loop.
+          if (me.roads.length >= 3 && funnel.reachableValue <= 0 && funnel.bestRoadRoute <= 0 &&
+            !canPay(after, COSTS.settlement) && !canPay(after, COSTS.city)) {
+            s -= 70;
+          }
         }
       }
       break;

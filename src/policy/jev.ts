@@ -1,4 +1,4 @@
-import type { Action, GameState, Recommendation } from "../types.ts";
+import { COSTS, type Action, type GameState, type Recommendation } from "../types.ts";
 import { compactState, opponentThreat, winRoute } from "../engine/features.ts";
 import { applyAction, cloneState, legalActions } from "../engine/game.ts";
 import { production } from "../engine/features.ts";
@@ -372,6 +372,18 @@ function isDirectVpBuild(action: Action): boolean {
   return action.type === "BUILD_SETTLEMENT" || action.type === "BUILD_CITY";
 }
 
+function canPaySettlementAfterRoad(state: GameState, action: Action): boolean {
+  const me = state.players.find((player) => player.id === action.player);
+  if (!me) return false;
+  const hand = { ...me.hand };
+  if (state.phase !== "road_building") {
+    hand.wood -= COSTS.road.wood;
+    hand.brick -= COSTS.road.brick;
+  }
+  return (Object.keys(COSTS.settlement) as Array<keyof typeof COSTS.settlement>)
+    .every((resource) => hand[resource] >= COSTS.settlement[resource]);
+}
+
 function roadHasStrategicProof(state: GameState, action: Action): boolean {
   if (action.type !== "BUILD_ROAD" || state.phase === "road_building") return true;
   const plan = longestRoadPlanScore(state, action);
@@ -382,7 +394,7 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
     (me?.settlements.length ?? 0) >= 2 &&
     (me?.settlements.length ?? 0) < 5
   );
-  if (expansionPhase && settlementRouteAfterRoad(state, action) > 0) {
+  if (expansionPhase && settlementRouteAfterRoad(state, action) > 0 && canPaySettlementAfterRoad(state, action)) {
     return true;
   }
   // When the expansion network has no immediately reachable house, allow
@@ -398,7 +410,7 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
     // wood/brick/sheep/wheat stall at two houses while the bots took the
     // reachable frontier. Keep the best bounded approach alive, but still
     // reject arbitrary backtracking edges.
-    if (score >= 24 && score >= bestScore - 10) return true;
+    if ((me?.roads.length ?? 0) < 3 && score >= 24 && score >= bestScore - 10) return true;
   }
   // A two-road forecast is not a secure award. The opponent gets a turn
   // between those roads and can extend, cut, or take the same route. Treating
