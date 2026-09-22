@@ -607,6 +607,27 @@ test("after the third building, a surplus road card converts into the city engin
   assert.ok(heuristicScore(state, brickToOre) > heuristicScore(state, brickToWood));
 });
 
+test("three settlements protect the no-city ore reserve from a non-converting trade", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  me.settlements = vertices.slice(0, 3);
+  me.roads = Object.keys(state.board.edges).slice(0, 4);
+  me.hand = { wood: 0, brick: 0, sheep: 1, wheat: 0, ore: 4 };
+  state.phase = "turn";
+  state.current = me.id;
+
+  const oreToWheat = legalActions(state).find((action) =>
+    action.type === "MARITIME_TRADE" && action.give === "ore" && action.get === "wheat",
+  );
+  const endTurn = legalActions(state).find((action) => action.type === "END_TURN");
+  assert.ok(oreToWheat);
+  assert.ok(endTurn);
+  // Four ore into one wheat creates neither a legal settlement nor a city;
+  // preserving the city reserve is the better competitive tempo.
+  assert.ok(heuristicScore(state, endTurn) > heuristicScore(state, oreToWheat));
+});
+
 test("two paid roads do not outrank a third road with no payable house", async () => {
   const previousOffline = process.env.JEV_OFFLINE;
   process.env.JEV_OFFLINE = "1";

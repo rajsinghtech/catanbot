@@ -2226,6 +2226,14 @@ export function heuristicScore(state: GameState, action: Action): number {
       if (me.settlements.length + me.cities.length === 2) s += 10;
       if (me.settlements.length + me.cities.length === 2) s += 8;
       else if (me.settlements.length + me.cities.length === 3) s += 4;
+      if (action.type === "BUILD_SETTLEMENT" && me.settlements.length >= 3 &&
+        me.cities.length === 0 && canPay(me.hand, COSTS.city)) {
+        // Once three settlements exist, a payable city is the normal engine
+        // conversion. A fourth house can still win when it is forced/denies,
+        // but it should not beat the first city merely because its base
+        // settlement score is high.
+        s -= 24;
+      }
       break;
     }
     case "PLACE_ROAD":
@@ -2363,6 +2371,13 @@ export function heuristicScore(state: GameState, action: Action): number {
     }
     case "BUILD_CITY": {
       s += 55;
+      if (me.settlements.length >= 3 && me.cities.length === 0) {
+        // The first city after a three-settlement expansion is a production
+        // and VP conversion, not just another one-point build. This keeps a
+        // strong ore/wheat engine from continuing into a fourth house while
+        // the opponents are already converting their opening pair.
+        s += 24;
+      }
       if (action.vertex) {
         const v = state.board.vertices[action.vertex];
         for (const hid of v.hexes) {
@@ -2675,11 +2690,32 @@ export function heuristicScore(state: GameState, action: Action): number {
         const after = afterSwap(me.hand, give, n, get, 1);
         const unlock = unlockLabel(me.hand, after);
         const cityProgress = costDistance(me.hand, COSTS.city) - costDistance(after, COSTS.city);
+        const noCityEngine = me.settlements.length >= 3 && me.cities.length === 0;
+        const directSettlementAfter = me.settlements.length < 5 &&
+          settlementSpots(state, me, false).length > 0 &&
+          canPay(after, COSTS.settlement);
+        const cityReserveSpent = noCityEngine && !directSettlementAfter && (
+          (give === "ore" && me.hand.ore >= COSTS.city.ore && after.ore < COSTS.city.ore) ||
+          (give === "wheat" && me.hand.wheat >= COSTS.city.wheat && after.wheat < COSTS.city.wheat)
+        );
         if (unlock === "city") s += 44;
         else if (unlock === "settlement") s += 34;
         else if (unlock === "dev card") s += 22;
         else if (unlock === "road") s += 14;
         if (cityProgress > 0) s += cityProgress * 18;
+        if (noCityEngine) {
+          if (directSettlementAfter) {
+            // Spending a city card is acceptable when the same conversion
+            // immediately produces the next legal house.
+            s += 28;
+          } else if (cityReserveSpent) {
+            // Do not turn a three-settlement engine into a fourth-settlement
+            // stall by trading away the exact ore/wheat reserve for a card
+            // that does not complete a real build.
+            s -= 58;
+          }
+          if ((get === "ore" || get === "wheat") && cityProgress > 0) s += 12;
+        }
         if (me.settlements.length > 0 && costDistance(me.hand, COSTS.city) <= 2 && (get === "wheat" || get === "ore")) {
           s += 12;
         }
