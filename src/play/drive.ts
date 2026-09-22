@@ -1013,13 +1013,13 @@ async function main() {
     });
     await cdp.evalOn(`window.__catanbotSetHudState?.(${hudState})`).catch(() => {});
   };
-  const waitForBridgeTradeAck = async (tradeId?: string): Promise<boolean> => {
+  const waitForBridgeTradeAck = async (tradeId?: string, checks = 5): Promise<boolean> => {
     if (!tradeId) return false;
-    for (let i = 0; i < 5; i++) {
-      await syncAppState(false);
+    for (let i = 0; i < checks; i++) {
+      await syncTradeState();
       const state = await json<{ game?: { pendingOffer?: { id?: string } | null } }>(`${BRIDGE}/api/state`).catch(() => null);
       if (state?.game?.pendingOffer?.id !== tradeId) return true;
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      if (i + 1 < checks) await new Promise((resolve) => setTimeout(resolve, 80));
     }
     return false;
   };
@@ -1048,7 +1048,14 @@ async function main() {
     if (!pending || Date.now() < pending.nextCheckAt) return;
     const id = pending.click.tradeId!;
     const after = await readAppSignature(id);
-    const acknowledged = Boolean(after && (!after.tradeExists || (after.tradeResponse != null && after.tradeResponse !== 0)));
+    let acknowledged = Boolean(after && (!after.tradeExists || (after.tradeResponse != null && after.tradeResponse !== 0)));
+    // A response can remove an offer before the next renderer signature read,
+    // while the bridge still has the previous projection. Refresh the tiny
+    // authoritative trade slice once the propagation window has elapsed so a
+    // successful accept/reject is not mistaken for a failed click.
+    if (!acknowledged && Date.now() - pending.sentAt >= 180) {
+      acknowledged = await waitForBridgeTradeAck(id, 1);
+    }
     if (acknowledged) {
       tradeRetries.delete(id);
       console.log("trade-ack", pending.click.actionType, id, `${Date.now() - pending.sentAt}ms`);
