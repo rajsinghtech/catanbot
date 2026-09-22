@@ -1363,7 +1363,7 @@ export function heuristicScore(state: GameState, action: Action): number {
           // otherwise stalled road into the third house. The old response
           // path mostly priced the opponent's next build and rejected these
           // offers, leaving the bot with two houses and no expansion card.
-          if ((o.give === "wood" || o.give === "brick" || o.give === "sheep") && me.hand[o.give] < COSTS.settlement[o.give]) {
+          if ((o.give === "wood" || o.give === "brick" || o.give === "sheep" || o.give === "wheat") && me.hand[o.give] < COSTS.settlement[o.give]) {
             s += 20;
           }
           if (settlementProgress > 0) s += 18 + settlementProgress * 8;
