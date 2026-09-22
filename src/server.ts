@@ -4,7 +4,7 @@ import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EMPTY_DEVS, type DevHand, type GameState, type Recommendation, type Resource } from "./types.ts";
 import { applyAction, legalActions, newGame, refreshAwards, stealCandidates, syncSetupFromPieces, totalVP, visibleVP } from "./engine/game.ts";
-import { production, winRoute } from "./engine/features.ts";
+import { opponentThreat, production, winRoute } from "./engine/features.ts";
 import { decide, jevStatus, printRec } from "./policy/jev.ts";
 import { heuristicScore } from "./policy/doctrine.ts";
 import { decodeIncoming, liveSeatsFromPayload } from "./colonist/ws.ts";
@@ -341,6 +341,7 @@ function reconcileTurnFromLiveApp(): void {
 
 function recommendationHasActiveActor(): boolean {
   if (!rec) return false;
+  if (rec.action.id === "WAIT_TURN") return game.current !== game.us;
   if (!recommendationMatchesLiveApp()) return false;
   if (rec.action.player === game.current) return true;
   // Colonist can keep currentTurnPlayerColor on the roller while it walks
@@ -480,6 +481,29 @@ function waitingRec(): Recommendation {
     targetProbabilities: {},
     latencyMs: 0,
     source: "mock",
+  };
+}
+
+function waitingTurnRec(): Recommendation {
+  const current = game.players.find((p) => p.id === game.current);
+  const action: Action = {
+    id: "WAIT_TURN",
+    type: "END_TURN",
+    player: game.current,
+    label: `Waiting for ${current?.name ?? game.current}`,
+  };
+  return {
+    action,
+    target: "WAIT_TURN",
+    reason: "The live Colonist turn belongs to another seat; waiting for our actionable menu.",
+    plan: "Respond immediately when our turn, discard, robber, or trade state becomes authoritative.",
+    opponentThreat: opponentThreat(game, game.us),
+    confidence: 100,
+    operation: "END_TURN",
+    operationProbabilities: {},
+    targetProbabilities: {},
+    latencyMs: 0,
+    source: "forced",
   };
 }
 
@@ -668,7 +692,7 @@ function decisionContextFingerprint(): string {
 export async function refreshRec(force = false): Promise<Recommendation> {
   reconcileTurnFromLiveApp();
   reconcilePendingIntent();
-  if (rec && !game.pendingOffer && !recommendationMatchesLiveApp()) {
+  if (rec && !game.pendingOffer && !recommendationHasActiveActor()) {
     if (process.env.CATANBOT_DEBUG_JEV === "1") console.log("rec-stale-app", rec.action.type, liveAppState.actionState);
     rec = null;
     lastDecisionFingerprint = null;
@@ -688,6 +712,16 @@ export async function refreshRec(force = false): Promise<Recommendation> {
       rec = waitingRec();
     }
     lastDecisionFingerprint = decisionFingerprint();
+    broadcast();
+    return rec;
+  }
+  if (playOn && playVsBots && game.current !== game.us && (game.mustDiscard[game.us] ?? 0) <= 0) {
+    // In bot-match mode the other seats are authoritative but not ours to
+    // click. Exposing their forced END_TURN/ROLL recommendations made the HUD
+    // look out of sync and caused the driver to churn through stale snapshots
+    // while waiting for our next menu.
+    rec = waitingTurnRec();
+    lastDecisionFingerprint = fingerprint;
     broadcast();
     return rec;
   }

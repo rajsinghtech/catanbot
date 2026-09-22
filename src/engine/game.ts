@@ -832,9 +832,8 @@ function collectDiscards(p: Player, need: number, acts: Action[]): void {
     });
     return;
   }
-  const cards: Array<Resource | "unknown"> = [];
-  for (const r of RESOURCES) for (let i = 0; i < p.hand[r]; i++) cards.push(r);
-  if (cards.length <= need) {
+  const totalCards = handCount(p.hand);
+  if (totalCards <= need) {
     const discard: Partial<Hand> = {};
     for (const r of RESOURCES) if (p.hand[r]) discard[r] = p.hand[r];
     acts.push({
@@ -847,44 +846,34 @@ function collectDiscards(p: Player, need: number, acts: Action[]): void {
     });
     return;
   }
-  const seen = new Set<string>();
-  const rec = (start: number, left: number, acc: Array<Resource | "unknown">) => {
-    if (left === 0) {
-      const d: Partial<Hand> = {};
-      let discardUnknown = 0;
-      for (const r of acc) {
-        if (r === "unknown") discardUnknown += 1;
-        else d[r] = (d[r] ?? 0) + 1;
-      }
-      const key = `${RESOURCES.map((r) => `${r}${d[r] ?? 0}`).join("")}:u${discardUnknown}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      // Keep enough combinations for the policy to preserve an expansion
-      // hand in an endgame discard. The old cap could omit the resource shape
-      // needed for a settlement and leave only early-enumerated options that
-      // dumped wood/sheep/wheat.
-      if (seen.size > 256) return;
+  // Enumerate resource-count combinations rather than individual card
+  // indexes. This is both smaller and complete: the old card-level recursion
+  // stopped after 256 shapes, often before it reached the ore/wheat-heavy
+  // option that the board-aware policy should compare.
+  const rec = (index: number, left: number, d: Partial<Hand>) => {
+    if (index === RESOURCES.length) {
+      if (left !== 0) return;
+      const key = RESOURCES.map((r) => `${r}${d[r] ?? 0}`).join("");
       acts.push({
         id: aid("DISCARD", [p.id, key]),
         type: "DISCARD",
         player: p.id,
-        discard: d,
-        discardUnknown,
-        label: `Discard ${[
-          ...RESOURCES.filter((r) => d[r]).map((r) => `${d[r]} ${r}`),
-          ...(discardUnknown ? [`${discardUnknown} unknown`] : []),
-        ].join(", ")}`,
+        discard: { ...d },
+        discardUnknown: 0,
+        label: `Discard ${RESOURCES.filter((r) => d[r]).map((r) => `${d[r]} ${r}`).join(", ")}`,
       });
       return;
     }
-    for (let i = start; i < cards.length; i++) {
-      acc.push(cards[i]);
-      rec(i + 1, left - 1, acc);
-      acc.pop();
-      if (seen.size > 256) return;
+    const resource = RESOURCES[index];
+    const max = Math.min(p.hand[resource], left);
+    for (let count = 0; count <= max; count += 1) {
+      if (count) d[resource] = count;
+      else delete d[resource];
+      rec(index + 1, left - count, d);
     }
+    delete d[resource];
   };
-  rec(0, need, []);
+  rec(0, need, {});
 }
 
 function spendDev(p: Player, kind: Exclude<DevKind, "vp">): void {

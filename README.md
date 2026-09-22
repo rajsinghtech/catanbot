@@ -76,4 +76,4 @@ Auto-click is deliberately gated to non-ranked bot matches. Recommendation-only 
 
 ## Publishing
 
-Before publishing to GitHub, keep `.env` out of the repository, verify that `AI_GATEWAY_API_KEY` is unset from tracked files, run `npm test`, and load `extension/` as an unpacked extension. This checkout has no configured remote, so publishing still needs an explicit GitHub repository URL and owner decision.
+Before publishing to GitHub, keep `.env` out of the repository, verify that `AI_GATEWAY_API_KEY` is unset from tracked files, run `npm test`, and load `extension/` as an unpacked extension. The public repository is https://github.com/rajsinghtech/catanbot; never commit a provider key.

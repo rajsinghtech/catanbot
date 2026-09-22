@@ -3,9 +3,10 @@ import { test } from "node:test";
 import { applyLogEvent } from "../src/colonist/apply.ts";
 import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
-import { newGame, legalActions, totalVP, visibleVP } from "../src/engine/game.ts";
+import { newGame, legalActions, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
-import { forcedWin, heuristicScore, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
+import { forcedWin, heuristicScore, roadExpansionScore, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
+import { decide } from "../src/policy/jev.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
   return { ...parseLogLine(text, icons), ...extra };
@@ -413,6 +414,47 @@ test("holds a near-city hand instead of buying a development card", () => {
   assert.ok(heuristicScore(state, endTurn) > heuristicScore(state, buyDev));
 });
 
+test("low-VP last settlement anchor beats a non-winning second city", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 29, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  me.settlements = [vertices[0]];
+  me.cities = [vertices[10]];
+  me.hand = { wood: 0, brick: 0, sheep: 0, wheat: 2, ore: 3 };
+  state.phase = "turn";
+  state.current = me.id;
+  state.turn = 1;
+
+  const city = legalActions(state).find((action) => action.type === "BUILD_CITY");
+  const endTurn = legalActions(state).find((action) => action.type === "END_TURN");
+  assert.ok(city);
+  assert.ok(endTurn);
+  assert.ok(heuristicScore(state, endTurn) > heuristicScore(state, city));
+});
+
+test("a payable city beats a speculative road chain", async () => {
+  const previousOffline = process.env.JEV_OFFLINE;
+  process.env.JEV_OFFLINE = "1";
+  try {
+    const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+    const me = state.players[0];
+    const vertices = Object.keys(state.board.vertices);
+    me.settlements = [vertices[0]];
+    me.cities = [vertices[10]];
+    me.roads = [roadSpots(state, me)[0]];
+    me.hand = { wood: 1, brick: 1, sheep: 0, wheat: 2, ore: 3 };
+    state.phase = "turn";
+    state.current = me.id;
+    state.turn = 10;
+
+    const rec = await decide(state);
+    assert.equal(rec.action.type, "BUILD_CITY");
+  } finally {
+    if (previousOffline === undefined) delete process.env.JEV_OFFLINE;
+    else process.env.JEV_OFFLINE = previousOffline;
+  }
+});
+
 test("near-win city engine preserves expansion cards during discard", () => {
   const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
   const me = state.players[0];
@@ -503,6 +545,65 @@ test("after the third building, a surplus road card converts into the city engin
   assert.ok(brickToOre);
   assert.ok(brickToWood);
   assert.ok(heuristicScore(state, brickToOre) > heuristicScore(state, brickToWood));
+});
+
+test("two paid roads do not outrank a third road with no payable house", async () => {
+  const previousOffline = process.env.JEV_OFFLINE;
+  process.env.JEV_OFFLINE = "1";
+  try {
+    const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+    const me = state.players[0];
+    const vertices = Object.keys(state.board.vertices);
+    const first = vertices[0];
+    const second = vertices.find((vertex) => vertex !== first && !state.board.vertices[first].edges.some((edge) =>
+      state.board.edges[edge].vertices.includes(vertex),
+    ));
+    assert.ok(second);
+    me.settlements = [first, second];
+    me.roads = [state.board.vertices[first].edges[0]];
+    const secondRoad = roadSpots(state, me)[0];
+    assert.ok(secondRoad);
+    me.roads.push(secondRoad);
+    me.hand = { wood: 1, brick: 1, sheep: 1, wheat: 4, ore: 0 };
+    state.phase = "turn";
+    state.current = me.id;
+    state.turn = 1;
+
+    const rec = await decide(state);
+    assert.notEqual(rec.action.type, "BUILD_ROAD");
+    assert.equal(rec.action.type, "MARITIME_TRADE");
+  } finally {
+    if (previousOffline === undefined) delete process.env.JEV_OFFLINE;
+    else process.env.JEV_OFFLINE = previousOffline;
+  }
+});
+
+test("a road ending at an opponent settlement is treated as a dead zone", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const opponent = state.players[1];
+  const start = Object.keys(state.board.vertices)[0];
+  const seedEdge = state.board.vertices[start].edges[0];
+  const middle = state.board.edges[seedEdge].vertices.find((vertex) => vertex !== start);
+  assert.ok(middle);
+  const deadEdge = state.board.vertices[middle].edges.find((edge) => edge !== seedEdge);
+  assert.ok(deadEdge);
+  const blocked = state.board.edges[deadEdge].vertices.find((vertex) => vertex !== middle);
+  assert.ok(blocked);
+
+  me.settlements = [start];
+  me.roads = [seedEdge];
+  me.hand = { wood: 1, brick: 1, sheep: 0, wheat: 0, ore: 0 };
+  opponent.settlements = [blocked];
+  state.phase = "turn";
+  state.current = me.id;
+
+  const road = legalActions(state).find((action) => action.type === "BUILD_ROAD" && action.edge === deadEdge);
+  const endTurn = legalActions(state).find((action) => action.type === "END_TURN");
+  assert.ok(road);
+  assert.ok(endTurn);
+  assert.ok(roadExpansionScore(state, road) < 0);
+  assert.ok(heuristicScore(state, road) < heuristicScore(state, endTurn));
 });
 
 test("a one-card house route beats buying a development card in the opening funnel", () => {

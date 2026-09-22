@@ -1,15 +1,21 @@
 import { COSTS, type Action, type GameState, type Recommendation } from "../types.ts";
 import { compactState, opponentThreat, winRoute } from "../engine/features.ts";
-import { applyAction, cloneState, legalActions } from "../engine/game.ts";
+import { applyAction, cloneState, legalActions, totalVP } from "../engine/game.ts";
 import { production } from "../engine/features.ts";
 import {
   forcedWin,
+  canPay,
   heuristicScore,
   longestRoadPlanScore,
   OPERATION_RULES,
   roadExpansionScore,
   settlementPairScore,
   settlementRouteAfterRoad,
+  settlementRouteAfterTwoRoads,
+  settlementRouteAfterThreeRoads,
+  settlementRouteAfterFourRoads,
+  settlementRouteCanPayAfterRoads,
+  settlementRouteHasResourceSupport,
   setupSecondSettlementScore,
   TARGET_RULES,
 } from "./doctrine.ts";
@@ -258,7 +264,7 @@ export async function decide(state: GameState): Promise<Recommendation> {
   const mockBest = ranked[0].a;
   const setupBest = setupDoctrinePick(state, legal);
   const bestDirectBuild = ranked.find((entry) => entry.a.type === "BUILD_SETTLEMENT" || entry.a.type === "BUILD_CITY");
-  const bestNonRoad = ranked.find((entry) => entry.a.type !== "BUILD_ROAD" && entry.a.type !== "PLACE_ROAD");
+  const bestBuildOrNonRoad = bestDirectBuild ?? ranked.find((entry) => entry.a.type !== "BUILD_ROAD" && entry.a.type !== "PLACE_ROAD");
   let guardedMockBest =
     mockBest.type === "BUILD_ROAD" && bestDirectBuild && bestDirectBuild.s + 12 >= heuristicScore(state, mockBest)
       ? bestDirectBuild.a
@@ -272,8 +278,12 @@ export async function decide(state: GameState): Promise<Recommendation> {
   // where the second house repeated wheat and skipped sheep/ore coverage.
   if (setupBest) guardedMockBest = setupBest;
 
-  if (guardedMockBest.type === "BUILD_ROAD" && bestNonRoad && !roadHasStrategicProof(state, guardedMockBest)) {
-    guardedMockBest = bestNonRoad.a;
+  if (guardedMockBest.type === "BUILD_ROAD" && bestBuildOrNonRoad && !roadHasStrategicProof(state, guardedMockBest)) {
+    // A rejected road must fall back to a real build before passive END_TURN.
+    // The previous fallback selected the highest-scoring non-road action;
+    // after the road guard penalized a speculative frontier that was often
+    // END_TURN, so a payable city was silently skipped instead of restored.
+    guardedMockBest = bestBuildOrNonRoad.a;
   }
 
   // Once we are within two VP of the target, a legal city/settlement is the
@@ -327,8 +337,8 @@ export async function decide(state: GameState): Promise<Recommendation> {
     if (directBuild && winRoute(state, state.us).need <= 2 && !isDirectVpBuild(picked)) {
       picked = directBuild.a;
     }
-    if (picked.type === "BUILD_ROAD" && bestNonRoad && !roadHasStrategicProof(state, picked)) {
-      picked = bestNonRoad.a;
+    if (picked.type === "BUILD_ROAD" && bestBuildOrNonRoad && !roadHasStrategicProof(state, picked)) {
+      picked = bestBuildOrNonRoad.a;
     }
     if (state.phase === "setup_settle" && playerHasOpeningSettlement(state) && picked.type === "PLACE_SETTLEMENT") {
       const wheat = (byType.get("PLACE_SETTLEMENT") ?? []).filter((action) => setupWheatProduction(state, action) > 0);
@@ -373,15 +383,19 @@ function isDirectVpBuild(action: Action): boolean {
 }
 
 function canPaySettlementAfterRoad(state: GameState, action: Action): boolean {
+  return settlementGapAfterRoad(state, action) === 0;
+}
+
+function settlementGapAfterRoad(state: GameState, action: Action): number {
   const me = state.players.find((player) => player.id === action.player);
-  if (!me) return false;
+  if (!me) return Number.POSITIVE_INFINITY;
   const hand = { ...me.hand };
   if (state.phase !== "road_building") {
     hand.wood -= COSTS.road.wood;
     hand.brick -= COSTS.road.brick;
   }
   return (Object.keys(COSTS.settlement) as Array<keyof typeof COSTS.settlement>)
-    .every((resource) => hand[resource] >= COSTS.settlement[resource]);
+    .reduce((missing, resource) => missing + Math.max(0, COSTS.settlement[resource] - hand[resource]), 0);
 }
 
 function roadHasStrategicProof(state: GameState, action: Action): boolean {
@@ -390,27 +404,90 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
   if ((plan.claimNow && plan.secureNow) || plan.defendNow) return true;
   const me = state.players.find((player) => player.id === action.player);
   const buildingCount = (me?.settlements.length ?? 0) + (me?.cities.length ?? 0);
+  const roadCount = me?.roads.length ?? 0;
+  const gap = settlementGapAfterRoad(state, action);
+  const oneRoadRoute = settlementRouteAfterRoad(state, action);
+  const twoRoadRoute = settlementRouteAfterTwoRoads(state, action);
+  const threeRoadRoute = settlementRouteAfterThreeRoads(state, action);
+  const fourRoadRoute = roadCount >= 3 && threeRoadRoute < 70
+    ? settlementRouteAfterFourRoads(state, action)
+    : 0;
+  const oneRoadPayable = settlementRouteCanPayAfterRoads(state, action, 1);
+  const twoRoadPayable = settlementRouteCanPayAfterRoads(state, action, 2);
+  const threeRoadPayable = settlementRouteCanPayAfterRoads(state, action, 3);
+  const fourRoadPayable = roadCount >= 3 && threeRoadRoute < 70
+    ? settlementRouteCanPayAfterRoads(state, action, 4)
+    : false;
+  const cityPayableNow = Boolean(me && canPay(me.hand, COSTS.city));
+  const oneRoadSupported = settlementRouteHasResourceSupport(state, action, 1);
+  const twoRoadSupported = settlementRouteHasResourceSupport(state, action, 2);
+  const anchorExpansion = (me?.settlements.length ?? 0) === 1 &&
+    (me?.cities.length ?? 0) >= 1 &&
+    totalVP(state, action.player) < state.config.victoryPoints - 1 &&
+    (oneRoadRoute > 0 || twoRoadRoute >= 70 || threeRoadRoute >= 70 || fourRoadRoute >= 70) &&
+    gap <= 3 &&
+    roadExpansionScore(state, action) >= 28 &&
+    (!cityPayableNow || oneRoadPayable);
+  const anchorFrontier = (me?.settlements.length ?? 0) === 1 &&
+    (me?.cities.length ?? 0) >= 1 &&
+    totalVP(state, action.player) < state.config.victoryPoints - 1 &&
+    roadCount < 9 &&
+    (oneRoadRoute > 0 || twoRoadRoute >= 70 || threeRoadRoute >= 70) &&
+    roadExpansionScore(state, action) >= 24 &&
+    (!cityPayableNow || oneRoadPayable);
   const expansionPhase = buildingCount === 2 || (
     (me?.settlements.length ?? 0) >= 2 &&
     (me?.settlements.length ?? 0) < 5
   );
-  if (expansionPhase && settlementRouteAfterRoad(state, action) > 0 && canPaySettlementAfterRoad(state, action)) {
+  if (expansionPhase && settlementRouteAfterRoad(state, action) > 0 && canPaySettlementAfterRoad(state, action) && oneRoadPayable) {
     return true;
   }
-  // When the expansion network has no immediately reachable house, allow
-  // the best bounded frontier edge to start the route. Requiring an immediate
-  // settlement here made the bot stop building roads exactly when it needed a
-  // first approach road, then spend the same wood/brick on trades or devs.
+  if (expansionPhase && roadCount < 5 && twoRoadRoute >= 70 && gap <= 2 && twoRoadPayable) {
+    // Keep a real two-edge approach alive after the opening network. The
+    // first edge need not expose the house yet, but it must lead to a good
+    // second edge and leave at most two settlement cards missing.
+    return true;
+  }
+  if (expansionPhase && roadCount < 2 &&
+    (oneRoadRoute > 0 || twoRoadRoute >= 70) && gap <= 3 &&
+    (oneRoadSupported || twoRoadSupported)) {
+    // Resource support can justify the opening approach, before the network
+    // has committed to a side of the board. Once two roads are down, the
+    // opponent gets intervening turns and this same heuristic becomes a
+    // license to chase an unsecured route with the last wood/brick pair.
+    return true;
+  }
+  if (expansionPhase && roadCount < 6 && threeRoadRoute >= 70 && gap <= 3 && threeRoadPayable) {
+    // A blocked or contested corner can need a third paid edge. This is still
+    // a concrete settlement route, not a generic Longest Road invitation:
+    // every edge in the bounded forecast is currently legal and payable.
+    return true;
+  }
+  if (expansionPhase && roadCount < 7 && fourRoadRoute >= 70 && gap <= 4 && fourRoadPayable) {
+    // A long contested approach is still valid when all four paid edges are
+    // presently affordable and the route forecast reaches a real house.
+    return true;
+  }
+  // When the expansion network has no immediately reachable house, only keep
+  // a first approach edge if the bounded forecast already reaches a concrete
+  // settlement route. A raw frontier score is not enough: the previous
+  // exception let a two-road player spend the last wood/brick on an attractive
+  // edge while the house remained unreachable.
   if (expansionPhase) {
     const candidates = legalActions(state).filter((candidate) => candidate.type === "BUILD_ROAD");
     const bestScore = Math.max(...candidates.map((candidate) => roadExpansionScore(state, candidate)), -Infinity);
     const score = roadExpansionScore(state, action);
-    // The first approach edge often cannot expose the house until the second
-    // edge is paid. Requiring the old 34-point threshold made a hand with
-    // wood/brick/sheep/wheat stall at two houses while the bots took the
-    // reachable frontier. Keep the best bounded approach alive, but still
-    // reject arbitrary backtracking edges.
-    if ((me?.roads.length ?? 0) < 3 && score >= 24 && score >= bestScore - 10) return true;
+    if (roadCount < 2 && (oneRoadRoute > 0 || twoRoadRoute >= 70) &&
+      (oneRoadSupported || twoRoadSupported || gap <= 1) &&
+      (!cityPayableNow || oneRoadPayable) &&
+      score >= 24 && score >= bestScore - 10) return true;
+  }
+  if (cityPayableNow && !oneRoadPayable) {
+    // A legal city is a concrete VP/production conversion. Do not spend its
+    // ore on a speculative road chain unless the first road immediately
+    // exposes a payable house; secure Longest Road/defense already returned
+    // above. This is the final guard against trade -> road -> no conversion.
+    return false;
   }
   // A two-road forecast is not a secure award. The opponent gets a turn
   // between those roads and can extend, cut, or take the same route. Treating
@@ -422,8 +499,15 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
   // roads are down the network must prove an actual award swing or immediate
   // settlement route before consuming another wood/brick pair. This keeps a
   // pretty but unsecured Longest Road chase from starving the VP engine.
-  if ((me?.roads.length ?? 0) >= 3) return false;
-  return roadExpansionScore(state, action) >= 52;
+  if (roadCount >= 3 && !anchorExpansion && !anchorFrontier) return false;
+  if (roadCount >= 2 && gap > 1 && !anchorExpansion && !anchorFrontier) return false;
+  if (anchorExpansion) return true;
+  if (anchorFrontier) {
+    const candidates = legalActions(state).filter((candidate) => candidate.type === "BUILD_ROAD");
+    const bestScore = Math.max(...candidates.map((candidate) => roadExpansionScore(state, candidate)), -Infinity);
+    return roadExpansionScore(state, action) >= bestScore - 10;
+  }
+  return false;
 }
 
 async function evaluateJev(

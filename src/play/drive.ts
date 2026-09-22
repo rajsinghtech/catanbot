@@ -692,6 +692,31 @@ async function main() {
       }
       if (locationIndex < 0) return { ok: false, reason: "Colonist map has no matching board location" };
 
+      // The bridge's engine/index projection can be one frame behind the
+      // renderer when an opponent has just claimed an edge. Never send a road
+      // confirmation based only on that cached index: ask the live Colonist
+      // tile state whether the exact runtime edge is occupied first.
+      if (target.prep === "road") {
+        const rawEdge = tileState._tileEdges?.[locationIndex];
+        const selectedPoint = rawEdge?.hexEdge || rawEdge;
+        const samePoint = (value, point) => {
+          const candidate = value?.hexEdge || value;
+          return Number.isFinite(candidate?.x) && Number.isFinite(candidate?.y) && Number.isFinite(candidate?.z)
+            && Number.isFinite(point?.x) && Number.isFinite(point?.y) && Number.isFinite(point?.z)
+            && Math.abs(candidate.x - point.x) < 0.0001
+            && Math.abs(candidate.y - point.y) < 0.0001
+            && Math.abs(candidate.z - point.z) < 0.0001;
+        };
+        const edgeEntries = Object.values(tileState.tileEdgeStates || {});
+        const liveEdge = edgeEntries.find((entry) => samePoint(entry, selectedPoint))
+          || edgeEntries[locationIndex]
+          || null;
+        const owner = Number(liveEdge?.owner ?? liveEdge?.color ?? liveEdge?.playerColor);
+        if (Number.isFinite(owner) && owner > 0) {
+          return { ok: false, reason: "live road edge already occupied (owner " + owner + ")", locationIndex };
+        }
+      }
+
       let method;
       if (target.prep === "settlement") method = "confirmBuildSettlement";
       else if (target.prep === "city") method = "confirmBuildCity";
@@ -998,19 +1023,58 @@ async function main() {
     }
     return false;
   };
+  type TradeRetry = {
+    click: Click;
+    sentAt: number;
+    nextCheckAt: number;
+    attempts: number;
+    nullReads: number;
+  };
+  const tradeRetries = new Map<string, TradeRetry>();
   const scheduleTradeRetry = (click: Click): void => {
-    if (!click.tradeId) return;
-    void (async () => {
-      // updateTradeResponse is fire-and-forget. A fast local sender return is
-      // normally enough, but a busy Colonist store can drop the first packet
-      // while leaving the offer visibly active. Verify without delaying the
-      // main loop, then resend the exact id once if it is still unresponded.
-      await new Promise((resolve) => setTimeout(resolve, 90));
-      const after = await readAppSignature(click.tradeId);
-      if (!after?.tradeExists || (after.tradeResponse != null && after.tradeResponse !== 0)) return;
-      const retry = await actuateWithRetry(click);
-      if (retry.ok) console.log("trade-retry", click.actionType, click.tradeId);
-    })().catch(() => {});
+    if (!click.tradeId || tradeRetries.has(click.tradeId)) return;
+    // Keep this as data for the main loop. A detached async CDP read can race
+    // the authoritative app-state sync and make a valid offer look gone.
+    tradeRetries.set(click.tradeId, {
+      click,
+      sentAt: Date.now(),
+      nextCheckAt: Date.now() + 120,
+      attempts: 0,
+      nullReads: 0,
+    });
+  };
+  const processTradeRetry = async (): Promise<void> => {
+    const pending = [...tradeRetries.values()].sort((a, b) => a.nextCheckAt - b.nextCheckAt)[0];
+    if (!pending || Date.now() < pending.nextCheckAt) return;
+    const id = pending.click.tradeId!;
+    const after = await readAppSignature(id);
+    const acknowledged = Boolean(after && (!after.tradeExists || (after.tradeResponse != null && after.tradeResponse !== 0)));
+    if (acknowledged) {
+      tradeRetries.delete(id);
+      console.log("trade-ack", pending.click.actionType, id, `${Date.now() - pending.sentAt}ms`);
+      return;
+    }
+
+    pending.nullReads = after ? 0 : pending.nullReads + 1;
+    // A renderer read can transiently return null while Chrome is busy. Give
+    // the first packet a short propagation window, then resend once even if
+    // the read stayed unavailable. The command is idempotent by offer id.
+    const propagationWindow = 260;
+    const shouldRetry = Date.now() - pending.sentAt >= propagationWindow || pending.nullReads >= 3;
+    if (!shouldRetry) {
+      pending.nextCheckAt = Date.now() + 70;
+      return;
+    }
+    if (pending.attempts >= 2) {
+      tradeRetries.delete(id);
+      console.log("trade-unconfirmed", pending.click.actionType, id);
+      return;
+    }
+    const retry = await actuateWithRetry(pending.click);
+    pending.attempts += 1;
+    pending.nextCheckAt = Date.now() + 100;
+    pending.nullReads = 0;
+    if (retry.ok) console.log("trade-retry", pending.click.actionType, id, `attempt ${pending.attempts}`);
   };
   const scheduleDevFollowupRetry = (click: Click, before: AppSignature | null): void => {
     if (!before || (click.actionType !== "PLAY_YEAR_OF_PLENTY" && click.actionType !== "PLAY_MONOPOLY")) return;
@@ -1192,6 +1256,7 @@ async function main() {
         }
       }
     }
+    await processTradeRetry();
     const synced = await syncAppState(!appStateReady);
     if (synced) appStateReady = true;
     const snap = await json<{
@@ -1486,7 +1551,24 @@ async function main() {
     }
     if (click.kind === "board" && click.x != null && click.y != null) {
       const result = await actuateWithRetry(click);
-      if (!result.ok) continue;
+      if (!result.ok) {
+        if (click.prep === "road" && /occupied/i.test(result.reason ?? "")) {
+          // Release the stale bridge intent immediately. The next loop sends
+          // the fresh runtime occupancy projection and can choose another
+          // legal edge instead of retrying the same opponent road forever.
+          console.log("board-occupied", click.edge ?? click.actionId, result.reason);
+          locationSyncsRemaining = Math.max(locationSyncsRemaining, 4);
+          await json(`${BRIDGE}/api/played`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ actionId: `CLEAR:${click.actionId}` }),
+          }).catch(() => {});
+          boardPending = null;
+          last = "";
+          lastAt = 0;
+        }
+        continue;
+      }
       const parsedState = Number(result.state);
       if (Number.isFinite(parsedState)) dispatchedAppActionState = parsedState;
       acted = true;
