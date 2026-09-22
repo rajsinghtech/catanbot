@@ -258,12 +258,11 @@ function thirdSettlementFunnel(state: GameState, id: string): {
   const me = player(state, id);
   // A city replaces a settlement in the state arrays, but it does not erase
   // the two-building opening milestone. Keep the funnel active at one house
-  // plus one city as well, and through a no-city settlement run: otherwise
-  // the first city or third house accidentally authorizes a dev-card loop
-  // while the player is still missing the next expansion conversion.
+  // plus one city as well, and while at least two settlements remain: a city
+  // must not authorize a dev-card loop while the next house is still the
+  // fastest catch-up route.
   const buildingCount = me.settlements.length + me.cities.length;
   const active = buildingCount === 2 || (
-    me.cities.length === 0 &&
     me.settlements.length >= 2 &&
     me.settlements.length < 5
   );

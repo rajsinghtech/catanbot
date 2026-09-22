@@ -379,7 +379,6 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
   const me = state.players.find((player) => player.id === action.player);
   const buildingCount = (me?.settlements.length ?? 0) + (me?.cities.length ?? 0);
   const expansionPhase = buildingCount === 2 || (
-    (me?.cities.length ?? 0) === 0 &&
     (me?.settlements.length ?? 0) >= 2 &&
     (me?.settlements.length ?? 0) < 5
   );
