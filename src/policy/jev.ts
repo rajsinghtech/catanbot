@@ -377,8 +377,24 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
   const plan = longestRoadPlanScore(state, action);
   if ((plan.claimNow && plan.secureNow) || plan.defendNow) return true;
   const me = state.players.find((player) => player.id === action.player);
-  if ((me?.settlements.length ?? 0) + (me?.cities.length ?? 0) === 2 && settlementRouteAfterRoad(state, action) > 0) {
+  const buildingCount = (me?.settlements.length ?? 0) + (me?.cities.length ?? 0);
+  const expansionPhase = buildingCount === 2 || (
+    (me?.cities.length ?? 0) === 0 &&
+    (me?.settlements.length ?? 0) >= 2 &&
+    (me?.settlements.length ?? 0) < 5
+  );
+  if (expansionPhase && settlementRouteAfterRoad(state, action) > 0) {
     return true;
+  }
+  // When the expansion network has no immediately reachable house, allow
+  // the best bounded frontier edge to start the route. Requiring an immediate
+  // settlement here made the bot stop building roads exactly when it needed a
+  // first approach road, then spend the same wood/brick on trades or devs.
+  if (expansionPhase) {
+    const candidates = legalActions(state).filter((candidate) => candidate.type === "BUILD_ROAD");
+    const bestScore = Math.max(...candidates.map((candidate) => roadExpansionScore(state, candidate)), -Infinity);
+    const score = roadExpansionScore(state, action);
+    if (score >= 34 && score >= bestScore - 8) return true;
   }
   // A two-road forecast is not a secure award. The opponent gets a turn
   // between those roads and can extend, cut, or take the same route. Treating

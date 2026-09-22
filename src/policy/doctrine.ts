@@ -228,12 +228,13 @@ function bestReachableSettlementValue(state: GameState, id: string): number {
 }
 
 /**
- * The first two settlements are the opening; the third settlement is the
- * expansion funnel.  A common weak-game pattern is to have two houses, pay
- * the wood/brick needed to point a road somewhere, then spend the remaining
- * wheat/sheep/ore on dev cards before that road can become a house.  Keep the
- * policy aware of whether a road actually creates a reachable settlement so
- * this phase is treated as a conversion problem rather than a raw road race.
+ * The first two settlements are the opening; the next settlement run is the
+ * expansion funnel. A common weak-game pattern is to have two or three
+ * houses, pay the wood/brick needed to point a road somewhere, then spend
+ * the remaining wheat/sheep/ore on dev cards before the next house exists.
+ * Keep the policy aware of whether a road actually creates a reachable
+ * settlement so this phase is treated as a conversion problem rather than a
+ * raw road race.
  */
 export function settlementRouteAfterRoad(state: GameState, action: Action): number {
   if (action.type !== "BUILD_ROAD" || !action.edge) return 0;
@@ -257,10 +258,15 @@ function thirdSettlementFunnel(state: GameState, id: string): {
   const me = player(state, id);
   // A city replaces a settlement in the state arrays, but it does not erase
   // the two-building opening milestone. Keep the funnel active at one house
-  // plus one city as well: otherwise the first city accidentally authorizes a
-  // dev-card loop while the player is still missing the road-to-third-house
-  // conversion.
-  const active = me.settlements.length + me.cities.length === 2;
+  // plus one city as well, and through a no-city settlement run: otherwise
+  // the first city or third house accidentally authorizes a dev-card loop
+  // while the player is still missing the next expansion conversion.
+  const buildingCount = me.settlements.length + me.cities.length;
+  const active = buildingCount === 2 || (
+    me.cities.length === 0 &&
+    me.settlements.length >= 2 &&
+    me.settlements.length < 5
+  );
   if (!active) {
     return { active: false, missing: 99, cityMissing: 99, reachableValue: 0, bestRoadRoute: 0 };
   }
@@ -1265,10 +1271,13 @@ export function heuristicScore(state: GameState, action: Action): number {
             // purchase even when the house still needs one more roll/trade.
             s += 34 + routeAfter * 0.22;
           } else if (routeAfter <= 0 && funnel.reachableValue <= 0) {
-            // A road that still does not expose a house is speculation during
-            // the two-settlement phase.  It must prove a secure award swing
-            // before taking priority over the conversion funnel.
-            s -= 24;
+            // If no one-edge road exposes a house, the best frontier edge can
+            // still be the necessary first step of a two-road route. Keep
+            // that bounded expansion move alive; otherwise the policy can
+            // trade/dev-loop forever with two houses and an unreachable
+            // third settlement.
+            if (funnel.bestRoadRoute <= 0 && roadValue >= 34 && me.roads.length <= 5) s += 12;
+            else s -= 24;
           }
         }
       }
