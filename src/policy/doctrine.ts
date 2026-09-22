@@ -439,6 +439,56 @@ export function roadExpansionScore(state: GameState, action: Action): number {
   return score;
 }
 
+/**
+ * Score the first edge of a Road Building pair by the best legal second edge
+ * it enables.  A greedy first-edge score routinely chose a pretty branch that
+ * left the second free road disconnected from the next house.  The pair is a
+ * single tempo decision: preserve the first edge's frontier value, then add
+ * the best second-edge frontier and the settlement that the completed pair
+ * exposes.
+ */
+function roadBuildingFirstScore(state: GameState, action: Action): number {
+  const firstScore = roadExpansionScore(state, action);
+  if (state.phase !== "road_building" || action.type !== "BUILD_ROAD") return firstScore;
+
+  const first = cloneState(state);
+  try {
+    applyAction(first, action, () => 0.5);
+  } catch {
+    return firstScore;
+  }
+  const secondActions = legalActions(first).filter((candidate) => candidate.type === "BUILD_ROAD");
+  if (!secondActions.length) return firstScore - 12;
+
+  let bestPair = -Infinity;
+  for (const second of secondActions) {
+    const afterPair = cloneState(first);
+    try {
+      applyAction(afterPair, second, () => 0.5);
+    } catch {
+      continue;
+    }
+    const secondScore = roadExpansionScore(first, second);
+    const us = player(afterPair, action.player);
+    const house = bestReachableSettlementValue(afterPair, action.player);
+    const settlementMissing = costDistance(us.hand, COSTS.settlement);
+    let pair = secondScore;
+    if (house > 0) {
+      // A reachable house is the purpose of expansion.  Reward a pair that
+      // can pay it now much more than a generic frontier extension.
+      pair += 48 + house * 0.42;
+      if (settlementMissing <= 1) pair += 22;
+      if (canPay(us.hand, COSTS.settlement)) pair += 46;
+    } else {
+      // Keep Longest Road/territory pairs available, but do not let an
+      // unconnected two-edge branch outrank a route that reaches a house.
+      pair -= 14;
+    }
+    if (pair > bestPair) bestPair = pair;
+  }
+  return firstScore + (Number.isFinite(bestPair) ? bestPair * 0.72 : -12);
+}
+
 function roadSecurity(state: GameState, us: string, afterLength: number): {
   blockers: number;
   maxDrop: number;
@@ -635,7 +685,7 @@ function roadBuildingValue(state: GameState, us: string): number {
   const first = legalActions(sim).filter((action) => action.type === "BUILD_ROAD");
   if (!first.length) return -18;
   const rankedFirst = first
-    .map((action) => ({ action, score: roadExpansionScore(sim, action) }))
+    .map((action) => ({ action, score: roadBuildingFirstScore(sim, action) }))
     .sort((a, b) => b.score - a.score);
   const bestFirst = rankedFirst[0];
   applyAction(sim, bestFirst.action, () => 0.5);
@@ -786,7 +836,7 @@ export function setupSecondSettlementScore(state: GameState, id: string, vertex:
         // Wheat is the conversion hinge for cities, devs, and most third
         // settlements. A wheatless second settlement is only acceptable when
         // the remaining board genuinely offers no wheat corner.
-        const wheatOptionExists = settlementSpots(sim, me, true).some(
+        const wheatOptionExists = settlementSpots(sim, player(sim, id), true).some(
           (spot) => localPips(sim, spot, "wheat") > 0,
         );
         score -= wheatOptionExists ? 108 : 35;
@@ -808,7 +858,7 @@ export function setupSecondSettlementScore(state: GameState, id: string, vertex:
   // when one remains.
   if (before.ore <= 0 && after.ore > 0) score += 18;
   if (after.ore <= 0) {
-    const oreOptionExists = settlementSpots(sim, me, true).some(
+    const oreOptionExists = settlementSpots(sim, player(sim, id), true).some(
       (spot) => localPips(sim, spot, "ore") > 0,
     );
     const alignedOrePort = sim.board.vertices[vertex]?.port?.ratio === 2 &&
@@ -926,6 +976,10 @@ export function settlementPairScore(state: GameState, action: Action): number {
   }
   const firstExpansion = ["wood", "brick", "sheep", "wheat"] as const;
   score += firstExpansion.filter((resource) => firstResources.has(resource)).length * 22;
+  // The reverse-order pick is contested. If a first house can take wood now,
+  // prefer securing it instead of assuming the later house will still have a
+  // road resource available.
+  if (firstResources.has("wood")) score += 30;
   if (!firstResources.has("brick") && !firstResources.has("sheep")) score -= 70;
   if (!firstResources.has("wood") && !firstResources.has("brick")) score -= 42;
 
@@ -942,8 +996,8 @@ export function settlementPairScore(state: GameState, action: Action): number {
     );
     const pairProduction = production(complement.state, action.player);
     const penalties: Array<[Resource, number]> = [
-      ["wood", 150],
-      ["brick", 135],
+      ["wood", 210],
+      ["brick", 160],
       ["wheat", 125],
       ["sheep", 145],
       ["ore", 112],
@@ -1210,7 +1264,9 @@ export function heuristicScore(state: GameState, action: Action): number {
     case "PLACE_ROAD":
     case "BUILD_ROAD": {
       s += action.type === "PLACE_ROAD" ? 10 : 8;
-      const roadValue = roadExpansionScore(state, action);
+      const roadValue = state.phase === "road_building"
+        ? roadBuildingFirstScore(state, action)
+        : roadExpansionScore(state, action);
       s += roadValue;
       const lrPlan = longestRoadPlanScore(state, action);
       s += lrPlan.value;
@@ -1275,7 +1331,7 @@ export function heuristicScore(state: GameState, action: Action): number {
             // that bounded expansion move alive; otherwise the policy can
             // trade/dev-loop forever with two houses and an unreachable
             // third settlement.
-            if (funnel.bestRoadRoute <= 0 && roadValue >= 34 && me.roads.length <= 5) s += 12;
+            if (funnel.bestRoadRoute <= 0 && roadValue >= 24 && me.roads.length <= 5) s += 12;
             else s -= 24;
           }
         }
