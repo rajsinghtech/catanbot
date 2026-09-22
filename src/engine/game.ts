@@ -859,7 +859,11 @@ function collectDiscards(p: Player, need: number, acts: Action[]): void {
       const key = `${RESOURCES.map((r) => `${r}${d[r] ?? 0}`).join("")}:u${discardUnknown}`;
       if (seen.has(key)) return;
       seen.add(key);
-      if (seen.size > 24) return;
+      // Keep enough combinations for the policy to preserve an expansion
+      // hand in an endgame discard. The old cap could omit the resource shape
+      // needed for a settlement and leave only early-enumerated options that
+      // dumped wood/sheep/wheat.
+      if (seen.size > 256) return;
       acts.push({
         id: aid("DISCARD", [p.id, key]),
         type: "DISCARD",

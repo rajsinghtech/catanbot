@@ -413,6 +413,27 @@ test("holds a near-city hand instead of buying a development card", () => {
   assert.ok(heuristicScore(state, endTurn) > heuristicScore(state, buyDev));
 });
 
+test("near-win city engine preserves expansion cards during discard", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  me.cities = Object.keys(state.board.vertices).slice(0, 3);
+  me.roads = [Object.keys(state.board.edges)[0]];
+  me.devs.vp = 1;
+  me.hand = { wood: 2, brick: 0, sheep: 2, wheat: 1, ore: 5 };
+  state.largestArmy = me.id;
+  state.phase = "discard";
+  state.current = me.id;
+  state.mustDiscard[me.id] = 5;
+
+  const discards = legalActions(state).filter((action) => action.type === "DISCARD");
+  const best = discards.slice().sort((a, b) => heuristicScore(state, b) - heuristicScore(state, a))[0];
+  assert.ok(best);
+  assert.equal(best.discard?.wood ?? 0, 0);
+  assert.equal(best.discard?.sheep ?? 0, 0);
+  assert.equal(best.discard?.wheat ?? 0, 0);
+  assert.equal(best.discard?.ore, 5);
+});
+
 test("the expansion funnel trades toward a road instead of a dev-card unlock", () => {
   const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
   const me = state.players[0];

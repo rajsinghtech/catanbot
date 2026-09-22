@@ -1588,9 +1588,19 @@ export function heuristicScore(state: GameState, action: Action): number {
     case "DISCARD": {
       const d = action.discard ?? {};
       s += 5;
+      const nearWinExpansion = me.settlements.length === 0 && totalVP(state, us) >= state.config.victoryPoints - 1;
       for (const r of RESOURCES) {
         const n = d[r] ?? 0;
-        if (r === "wheat" || r === "ore") s -= n * 3;
+        if (nearWinExpansion) {
+          // A player with only cities can still win the final point through a
+          // new settlement, but only if wood/brick/sheep/wheat survive the
+          // discard. Ore is useful for cities, not for that emergency route;
+          // when the player is one point away, discard ore before the cards
+          // that can be converted into a house after Road Building or a port
+          // trade.
+          if (r === "ore") s += n * 5;
+          else s -= n * 7;
+        } else if (r === "wheat" || r === "ore") s -= n * 3;
         else s -= n;
       }
       break;
