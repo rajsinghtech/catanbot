@@ -945,9 +945,10 @@ function defensiveThreatDelta(state: GameState, action: Action): number {
   const target = state.config.victoryPoints;
   const opponents = state.players.filter((p) => p.id !== us);
   const before = Math.max(0, ...opponents.map((p) => oneTurnVpCeiling(state, p.id)));
+  const visibleDanger = opponents.some((opponent) => opponentIsDangerous(state, opponent.id));
   // Do not spend extra graph/simulation time until an opponent is close
   // enough that denying their next build can change the winner.
-  if (before < target - 3) return 0;
+  if (before < target - 3 && !visibleDanger) return 0;
   if (![
     "BUILD_SETTLEMENT",
     "BUILD_CITY",
@@ -972,6 +973,28 @@ function defensiveThreatDelta(state: GameState, action: Action): number {
   }
 }
 
+/**
+ * Public VP alone understates an opponent who is one road/award swing away
+ * from the target.  Live Colonist hides their resource hand and VP cards, so
+ * use the visible board structure as the threat signal: a player at 7 VP
+ * with four roads, five settlements, or a city engine deserves denial now,
+ * not after the win screen appears.
+ */
+function opponentIsDangerous(state: GameState, id: string): boolean {
+  const p = player(state, id);
+  const target = state.config.victoryPoints;
+  const visible = visibleVP(state, id);
+  const potentialRoadAward = state.longestRoad === id ? 0 : roadLength(state, id) >= 4 ? 2 : 0;
+  const potentialArmyAward = state.largestArmy === id ? 0 : p.knightsPlayed >= 2 ? 2 : 0;
+  if (visible + potentialRoadAward + potentialArmyAward >= target - 1) return true;
+  if (visible >= target - 3) return true;
+  return visible >= target - 4 && (
+    roadLength(state, id) >= 4 ||
+    p.settlements.length >= 4 ||
+    p.cities.length >= 2
+  );
+}
+
 export function heuristicScore(state: GameState, action: Action): number {
   const us = action.player;
   const me = player(state, us);
@@ -981,7 +1004,7 @@ export function heuristicScore(state: GameState, action: Action): number {
   const oppVp = Math.max(0, ...opp.map((p) => totalVP(state, p.id)));
   const myVp = totalVP(state, us);
   const endgame = myVp >= state.config.victoryPoints - 4 || oppVp >= state.config.victoryPoints - 4;
-  const opponentNearWin = opp.some((p) => visibleVP(state, p.id) >= state.config.victoryPoints - 2);
+  const opponentNearWin = opp.some((p) => opponentIsDangerous(state, p.id));
   const funnel = thirdSettlementFunnel(state, us);
 
   // Add a direct win-sequence defense layer before operation-specific
@@ -1097,7 +1120,7 @@ export function heuristicScore(state: GameState, action: Action): number {
         // award or one award away from winning. This is the table-level
         // denial that raw road length misses.
         if (rivalLen >= 4) s += 14;
-        if (totalVP(state, rival.id) + (state.longestRoad === rival.id ? 0 : 2) >= state.config.victoryPoints - 1) s += 22;
+        if (opponentIsDangerous(state, rival.id)) s += 22;
       }
       if (endgame) s += 10;
       break;
@@ -1143,7 +1166,7 @@ export function heuristicScore(state: GameState, action: Action): number {
         .slice()
         .sort((a, b) => totalVP(state, b.id) - totalVP(state, a.id))[0];
       if (me.knightsPlayed === 2) s += 24;
-      if (strongestOpponent && totalVP(state, strongestOpponent.id) >= state.config.victoryPoints - 3) s += 18;
+      if (strongestOpponent && opponentIsDangerous(state, strongestOpponent.id)) s += 18;
       if (strongestOpponent) {
         const targetPressure = Math.max(...RESOURCES.map((r) => resourcePressure(state, strongestOpponent.id, r)));
         s += targetPressure * 4;
@@ -1175,7 +1198,7 @@ export function heuristicScore(state: GameState, action: Action): number {
               // opponent has nothing. When the robber can interrupt that
               // opponent's productive tile, denial is worth more than the
               // ordinary pip/steal estimate.
-              if (visibleVP(state, pl.id) >= state.config.victoryPoints - 2) {
+              if (opponentIsDangerous(state, pl.id)) {
                 theirs += n * pips * 3;
                 s += n * 10;
               }
@@ -1199,7 +1222,7 @@ export function heuristicScore(state: GameState, action: Action): number {
         // passive build turn.
         const resource = action.resource as Resource;
         const productionThreat = opp.reduce(
-          (n, o) => n + production(state, o.id)[resource] * (visibleVP(state, o.id) >= state.config.victoryPoints - 2 ? 2 : 1),
+          (n, o) => n + production(state, o.id)[resource] * (opponentIsDangerous(state, o.id) ? 2 : 1),
           0,
         );
         s += productionThreat * (opponentNearWin ? 2.5 : 1.2);
@@ -1241,7 +1264,7 @@ export function heuristicScore(state: GameState, action: Action): number {
         else if (senderUnlock === "settlement") s -= 28;
         else if (senderUnlock === "dev card") s -= 18;
         else if (senderUnlock === "road") s -= 12;
-        if (senderUnlock && totalVP(state, o.from) >= state.config.victoryPoints - 3) s -= 14;
+        if (senderUnlock && opponentIsDangerous(state, o.from)) s -= 14;
         if (after[o.get] < 0) s -= 40;
       }
       break;
