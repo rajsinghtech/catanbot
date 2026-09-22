@@ -5,7 +5,7 @@ import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
 import { newGame, legalActions, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
-import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, roadExpansionScore, roadOpenSettlementTarget, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
+import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, roadBuildingHasStrategicProof, roadExpansionScore, roadOpenSettlementTarget, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
 import { decide } from "../src/policy/jev.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
@@ -693,6 +693,58 @@ test("Longest Road planner values a bridge between two short road islands", () =
   const endTurn = legalActions(state).find((action) => action.type === "END_TURN");
   assert.ok(endTurn);
   assert.ok(heuristicScore(state, bridge) > heuristicScore(state, endTurn));
+});
+
+test("Road Building is proof-gated when it cannot reach a house or secure Longest Road", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 1, us: "red" });
+  const me = state.players[0];
+  const opponent = state.players[1];
+  me.settlements = ["0,-1|0,0|1,-1"];
+  me.roads = [
+    "-1,0|0,-1|0,0|0,-1|0,0|1,-1",
+    "-1,0|-1,1|0,0|-1,0|0,-1|0,0",
+  ];
+  me.devs.road_building = 1;
+  me.hand = { wood: 1, brick: 1, sheep: 1, wheat: 0, ore: 0 };
+  opponent.roads = [
+    "2,-1|2,-2|3,-2|2,-1|3,-1|3,-2",
+    "2,-1|2,0|3,-1|2,-1|3,-1|3,-2",
+    "1,0|2,-1|2,0|2,-1|2,0|3,-1",
+    "1,-1|1,0|2,-1|1,0|2,-1|2,0",
+    "0,0|1,-1|1,0|0,0|1,0|2,-1",
+  ];
+  state.phase = "turn";
+  state.current = me.id;
+
+  const roadBuilding = legalActions(state).find((action) => action.type === "PLAY_ROAD_BUILDING");
+  const endTurn = legalActions(state).find((action) => action.type === "END_TURN");
+  assert.ok(roadBuilding);
+  assert.ok(endTurn);
+  assert.equal(roadBuildingHasStrategicProof(state), false);
+  assert.ok(heuristicScore(state, roadBuilding) < heuristicScore(state, endTurn));
+});
+
+test("Road Building proof accepts an immediate secure bridge award", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  me.settlements = [
+    "-1,-1|-1,-2|0,-2",
+    "1,-2|2,-2|2,-3",
+  ];
+  me.roads = [
+    "-1,-1|0,-1|0,-2|0,-1|0,-2|1,-2",
+    "-1,-1|-1,-2|0,-2|-1,-1|0,-1|0,-2",
+    "0,-2|1,-2|1,-3|1,-2|1,-3|2,-3",
+    "1,-2|1,-3|2,-3|1,-2|2,-2|2,-3",
+  ];
+  me.devs.road_building = 1;
+  me.hand = { wood: 0, brick: 0, sheep: 0, wheat: 0, ore: 0 };
+  state.phase = "turn";
+  state.current = me.id;
+
+  const roadBuilding = legalActions(state).find((action) => action.type === "PLAY_ROAD_BUILDING");
+  assert.ok(roadBuilding);
+  assert.equal(roadBuildingHasStrategicProof(state), true);
 });
 
 test("an unsecured Longest Road race does not justify a road before a house is payable", () => {

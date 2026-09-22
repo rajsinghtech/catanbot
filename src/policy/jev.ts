@@ -10,6 +10,7 @@ import {
   longestRoadPlanScore,
   OPERATION_RULES,
   roadExpansionScore,
+  roadBuildingHasStrategicProof,
   roadOpenSettlementTarget,
   settlementPairScore,
   settlementRouteAfterRoad,
@@ -288,6 +289,13 @@ export async function decide(state: GameState): Promise<Recommendation> {
     guardedMockBest = bestBuildOrNonRoad.a;
   }
 
+  if (guardedMockBest.type === "PLAY_ROAD_BUILDING" && bestBuildOrNonRoad && !roadBuildingHasStrategicProof(state, state.us)) {
+    // Do not let the remote evaluator spend two free roads on a merely
+    // attractive branch.  The card must already have a legal house route or
+    // a secure Longest Road conversion in the local authoritative state.
+    guardedMockBest = bestBuildOrNonRoad.a;
+  }
+
   // Once we are within two VP of the target, a legal city/settlement is the
   // fastest reliable win progress. Do not let a road, dev purchase, or end
   // turn consume that tempo; forcedWin still handles the exact final point.
@@ -340,6 +348,9 @@ export async function decide(state: GameState): Promise<Recommendation> {
       picked = directBuild.a;
     }
     if (picked.type === "BUILD_ROAD" && bestBuildOrNonRoad && !roadHasStrategicProof(state, picked)) {
+      picked = bestBuildOrNonRoad.a;
+    }
+    if (picked.type === "PLAY_ROAD_BUILDING" && bestBuildOrNonRoad && !roadBuildingHasStrategicProof(state, state.us)) {
       picked = bestBuildOrNonRoad.a;
     }
     if (state.phase === "setup_settle" && playerHasOpeningSettlement(state) && picked.type === "PLACE_SETTLEMENT") {

@@ -881,6 +881,74 @@ function roadBuildingFirstScore(state: GameState, action: Action): number {
   return firstScore + (Number.isFinite(bestPair) ? bestPair * 0.72 : -12);
 }
 
+/**
+ * A Road Building card is two free roads, but it is still a scarce tempo
+ * action.  The card needs a concrete conversion: the completed pair must
+ * make a settlement legal now, or it must create a defensible Longest Road
+ * claim/defense that survives one rival extension.  Raw frontier value is
+ * deliberately not enough here; that was the live failure where the bot
+ * spent the card on a contested branch while a rival already had 11 roads.
+ */
+export function roadBuildingHasStrategicProof(state: GameState, us = state.us): boolean {
+  return doctrineMemo(state, `road-building-proof:${us}`, () => {
+    const sim = cloneState(state);
+    sim.current = us;
+    sim.phase = "road_building";
+    sim.pendingRoads = 2;
+    const firstActions = legalActions(sim).filter((action) => action.type === "BUILD_ROAD");
+    if (!firstActions.length) return false;
+    const beforeLength = roadLength(state, us);
+    const currentRivalLength = Math.max(
+      0,
+      ...state.players.filter((p) => p.id !== us).map((p) => roadLength(state, p.id)),
+    );
+
+    for (const firstAction of firstActions) {
+      const afterFirst = cloneState(sim);
+      try {
+        applyAction(afterFirst, firstAction, () => 0.5);
+      } catch {
+        continue;
+      }
+      const secondActions = legalActions(afterFirst).filter((action) => action.type === "BUILD_ROAD");
+      // A pair is the normal case.  If the first road exhausts the legal
+      // frontier, still evaluate it: a single bridge edge can immediately
+      // take/defend the award on a crowded board.
+      const candidates = secondActions.length ? secondActions : [null];
+      for (const secondAction of candidates) {
+        const afterPair = secondAction ? cloneState(afterFirst) : afterFirst;
+        if (secondAction) {
+          try {
+            applyAction(afterPair, secondAction, () => 0.5);
+          } catch {
+            continue;
+          }
+        }
+
+        const canBuildHouse = legalActions(afterPair).some((action) => action.type === "BUILD_SETTLEMENT");
+        if (canBuildHouse) return true;
+
+        const pairLength = roadLength(afterPair, us);
+        const rivalNextLength = Math.max(
+          0,
+          ...afterPair.players
+            .filter((p) => p.id !== us)
+            .map((p) => opponentRoadLengthAfterOneRoad(afterPair, p.id)),
+        );
+        const security = roadSecurity(afterPair, us, pairLength);
+        const rivalCanThreatenHolder = state.longestRoad === us &&
+          Math.max(currentRivalLength, rivalNextLength) >= beforeLength;
+        const secureAward = pairLength >= 5 &&
+          pairLength > rivalNextLength &&
+          security.worstLength > rivalNextLength &&
+          (state.longestRoad !== us || (rivalCanThreatenHolder && pairLength > beforeLength));
+        if (secureAward) return true;
+      }
+    }
+    return false;
+  });
+}
+
 function roadSecurity(state: GameState, us: string, afterLength: number): {
   blockers: number;
   maxDrop: number;
@@ -1145,6 +1213,13 @@ export function boundedSecureLongestRoadRace(
 }
 
 function roadBuildingValue(state: GameState, us: string): number {
+  const strategicProof = roadBuildingHasStrategicProof(state, us);
+  if (!strategicProof) {
+    // Keep this well below END_TURN after the global threat/tempo terms are
+    // added in heuristicScore.  A free road pair without a concrete house or
+    // secure award is not a reason to spend the card.
+    return -96;
+  }
   const sim = cloneState(state);
   sim.current = us;
   sim.phase = "road_building";
@@ -1176,7 +1251,7 @@ function roadBuildingValue(state: GameState, us: string): number {
     // payable settlement nor a secure Longest Road swing is just speculative
     // geometry. Preserve the card for a real conversion instead of burning it
     // while a rival is extending toward the finish.
-    return -36;
+    return -12;
   }
   const award = longestRoadPlanScore(state, bestFirst.action);
   return bestFirst.score + second * 0.72 + (house > 0 ? house * 0.34 : -8) + award.value * 0.65;
@@ -2411,12 +2486,14 @@ export function heuristicScore(state: GameState, action: Action): number {
     case "PLAY_ROAD_BUILDING":
       {
         const cardValue = roadBuildingValue(state, us);
+        const strategicProof = roadBuildingHasStrategicProof(state, us);
         s += cardValue;
         // Free roads are a conversion card, not two lottery tickets. Before a
         // roll, preserve it unless the pair already proves a house/award/cut;
         // after a roll, the same proof can be acted on immediately.
         if (state.phase === "roll" && cardValue < 36 && !opponentNearWin) s -= 20;
         if (cardValue >= 80) s += 12;
+        if (!strategicProof) s -= 60;
       }
       if (endgame) s += 12;
       break;
