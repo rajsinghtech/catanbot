@@ -1074,6 +1074,48 @@ export function longestRoadPlanScore(state: GameState, action: Action): LongestR
   };
 }
 
+/**
+ * A future Longest Road route is actionable only when it is a real race, not
+ * just a pretty branch.  Keep this separate from `claimNow`: the first edge
+ * can be the correct investment even when two more edges are needed, but the
+ * route must be bounded, already secure against the current holder, and not
+ * consume a hand that can immediately build a city or settlement.
+ */
+export function boundedSecureLongestRoadRace(
+  state: GameState,
+  action: Action,
+  plan = longestRoadPlanScore(state, action),
+): boolean {
+  if (action.type !== "BUILD_ROAD" || !action.edge || state.phase === "setup_road") return false;
+  const me = player(state, action.player);
+  const postRoadHand = state.phase === "road_building"
+    ? me.hand
+    : {
+        ...me.hand,
+        wood: me.hand.wood - COSTS.road.wood,
+        brick: me.hand.brick - COSTS.road.brick,
+      };
+  const settlementGap = costDistance(postRoadHand, COSTS.settlement);
+  const canBuildSettlementNow =
+    me.settlements.length + me.cities.length < 9 &&
+    me.settlements.length < 5 &&
+    canPay(me.hand, COSTS.settlement) &&
+    settlementSpots(state, me, false).length > 0;
+
+  return state.longestRoad !== action.player &&
+    !canBuildSettlementNow &&
+    !canPay(me.hand, COSTS.city) &&
+    plan.claimSoon &&
+    plan.secureSoon &&
+    plan.roadsToGoal !== null &&
+    plan.roadsToGoal <= 3 &&
+    plan.opponentLength >= 4 &&
+    plan.bestLength >= Math.max(5, plan.opponentLength + 1) &&
+    me.roads.length < 6 &&
+    settlementGap <= 3 &&
+    roadExpansionScore(state, action) >= 24;
+}
+
 function roadBuildingValue(state: GameState, us: string): number {
   const sim = cloneState(state);
   sim.current = us;
@@ -2019,6 +2061,7 @@ export function heuristicScore(state: GameState, action: Action): number {
       }
       if (action.type === "BUILD_ROAD") {
         const secureAwardSwing = (lrPlan.claimNow && lrPlan.secureNow) || lrPlan.defendNow;
+        const secureRaceApproach = boundedSecureLongestRoadRace(state, action, lrPlan);
         const canBuyDev = state.deck.length > 0 && canPay(me.hand, COSTS.dev);
         const routeAfter = settlementRouteAfterRoad(state, action);
         const routeAfterTwo = settlementRouteAfterTwoRoads(state, action);
@@ -2041,7 +2084,7 @@ export function heuristicScore(state: GameState, action: Action): number {
         // swing. This is the opportunity-cost layer that stops attractive
         // frontier geometry from consuming the wheat/sheep/ore needed for
         // cities and development cards.
-        if (!secureAwardSwing) {
+        if (!secureAwardSwing && !secureRaceApproach) {
           if (me.roads.length >= 4 && !anchorFrontier) s -= 32;
           if (me.roads.length >= 6 && !anchorFrontier) s -= 45;
           if (me.roads.length >= 8 && !anchorFrontier) s -= 55;

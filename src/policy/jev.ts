@@ -4,6 +4,7 @@ import { applyAction, cloneState, legalActions, totalVP } from "../engine/game.t
 import { production } from "../engine/features.ts";
 import {
   forcedWin,
+  boundedSecureLongestRoadRace,
   canPay,
   heuristicScore,
   longestRoadPlanScore,
@@ -403,6 +404,14 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
   if (action.type !== "BUILD_ROAD" || state.phase === "road_building") return true;
   const plan = longestRoadPlanScore(state, action);
   if ((plan.claimNow && plan.secureNow) || plan.defendNow) return true;
+  if (boundedSecureLongestRoadRace(state, action, plan)) {
+    // A bounded, secure race is a valid investment even when the next house
+    // is not payable yet. This is intentionally narrower than `claimSoon`:
+    // the current holder must already be at four roads, the route must reach
+    // the award within three total edges, and no direct VP conversion may be
+    // sacrificed for it.
+    return true;
+  }
   const me = state.players.find((player) => player.id === action.player);
   const buildingCount = (me?.settlements.length ?? 0) + (me?.cities.length ?? 0);
   const roadCount = me?.roads.length ?? 0;
