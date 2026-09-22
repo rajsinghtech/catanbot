@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { applyLogEvent } from "../src/colonist/apply.ts";
 import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
-import { newGame, legalActions, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
+import { applyAction, newGame, legalActions, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
-import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, roadBuildingHasStrategicProof, roadExpansionScore, roadOpenSettlementTarget, roadReservesExpansionLane, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
+import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, openingResourceResilience, roadBuildingHasStrategicProof, roadExpansionScore, roadOpenSettlementTarget, roadReservesExpansionLane, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
 import { decide } from "../src/policy/jev.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
@@ -279,6 +279,38 @@ test("setup settlement scoring values the pair and denial, not only raw pips", (
   assert.match(label, /wheat|ore/);
 });
 
+test("opening resilience prefers independent city resources when alternatives exist", () => {
+  const base = newGame({ playerCount: 4 }, { seed: 8, us: "red" });
+  const vertices = Object.keys(base.board.vertices);
+  const pairs: Array<{ score: number; criticalSources: number }> = [];
+  for (const first of vertices) {
+    for (const second of vertices) {
+      if (first >= second) continue;
+      if (base.board.vertices[first].edges.some((edge) => base.board.edges[edge].vertices.includes(second))) continue;
+      const state = structuredClone(base);
+      state.players[0].settlements = [first, second];
+      state.current = "red";
+      state.phase = "setup_settle";
+      const hexes = new Set<string>();
+      for (const vertex of [first, second]) {
+        for (const hex of state.board.vertices[vertex].hexes) {
+          const terrain = state.board.hexes[hex].terrain;
+          if (terrain === "wheat" || terrain === "ore") hexes.add(hex);
+        }
+      }
+      const criticalSources = hexes.size;
+      const score = openingResourceResilience(state, "red", [first, second]);
+      if (criticalSources === 1 && score < 0) pairs.push({ score, criticalSources });
+      if (criticalSources >= 2 && score > 0) pairs.push({ score, criticalSources });
+    }
+  }
+  const fragile = pairs.find((pair) => pair.criticalSources === 1);
+  const resilient = pairs.find((pair) => pair.criticalSources >= 2);
+  assert.ok(fragile, "fixture should contain a fragile critical-resource pair");
+  assert.ok(resilient, "fixture should contain a resilient critical-resource pair");
+  assert.ok(resilient.score > fragile.score);
+});
+
 test("near-win hidden hands make Monopoly target the opponent's strongest production", () => {
   const state = newGame({ playerCount: 4, victoryPoints: 10 }, { seed: 8, us: "red" });
   state.phase = "roll";
@@ -332,6 +364,35 @@ test("a weak pre-roll knight waits for a better robber window", () => {
   assert.ok(play);
   assert.ok(roll);
   assert.ok(heuristicScore(state, roll) > heuristicScore(state, play));
+});
+
+test("a knight clears our blocked ore or wheat engine before a passive roll", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 8, us: "red" });
+  const me = state.players[0];
+  const vertex = Object.keys(state.board.vertices).find((candidate) =>
+    state.board.vertices[candidate].hexes.some((hex) => {
+      const tile = state.board.hexes[hex];
+      return (tile.terrain === "ore" || tile.terrain === "wheat") && tile.number != null;
+    }),
+  );
+  assert.ok(vertex);
+  const blocked = state.board.vertices[vertex].hexes.find((hex) => {
+    const tile = state.board.hexes[hex];
+    return (tile.terrain === "ore" || tile.terrain === "wheat") && tile.number != null;
+  });
+  assert.ok(blocked);
+  me.settlements = [vertex];
+  me.devs.knight = 1;
+  state.robberHex = blocked;
+  state.phase = "roll";
+  state.current = me.id;
+  state.turn = 1;
+
+  const play = legalActions(state).find((action) => action.type === "PLAY_KNIGHT");
+  const roll = legalActions(state).find((action) => action.type === "ROLL");
+  assert.ok(play);
+  assert.ok(roll);
+  assert.ok(heuristicScore(state, play) > heuristicScore(state, roll));
 });
 
 test("a city is only a one-VP forced-win increment", () => {
@@ -436,6 +497,33 @@ test("Year of Plenty completes a city hinge after expansion", () => {
   assert.ok(wheatWheat);
   assert.ok(woodSheep);
   assert.ok(heuristicScore(state, wheatWheat) > heuristicScore(state, woodSheep));
+});
+
+test("Year of Plenty sees an ore pair that completes a city through a 2:1 port", () => {
+  const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  me.settlements = vertices.slice(0, 3);
+  state.board.vertices[me.settlements[0]].port = { ratio: 2, resource: "brick" };
+  me.hand = { wood: 3, brick: 2, sheep: 0, wheat: 3, ore: 0 };
+  state.phase = "year_of_plenty";
+  state.current = me.id;
+  state.pendingYop = 2;
+
+  const options = legalActions(state).filter((action) => action.type === "PLAY_YEAR_OF_PLENTY");
+  const twoOre = options.find((action) => action.resources?.join(":") === "ore:ore");
+  const sheepOre = options.find((action) => action.resources?.join(":") === "sheep:ore");
+  assert.ok(twoOre);
+  assert.ok(sheepOre);
+  assert.ok(heuristicScore(state, twoOre) > heuristicScore(state, sheepOre));
+
+  const afterPlenty = applyAction(state, twoOre);
+  const brickPortTrade = legalActions(afterPlenty).find((action) =>
+    action.type === "MARITIME_TRADE" && action.give === "brick" && action.get === "ore",
+  );
+  assert.ok(brickPortTrade);
+  const afterTrade = applyAction(afterPlenty, brickPortTrade);
+  assert.ok(legalActions(afterTrade).some((action) => action.type === "BUILD_CITY"));
 });
 
 test("holds a near-city hand instead of buying a development card", () => {
@@ -628,7 +716,7 @@ test("three settlements protect the no-city ore reserve from a non-converting tr
   assert.ok(heuristicScore(state, endTurn) > heuristicScore(state, oreToWheat));
 });
 
-test("two paid roads do not outrank a third road with no payable house", async () => {
+test("a third expansion road can claim a valuable settlement lane before the house is payable", async () => {
   const previousOffline = process.env.JEV_OFFLINE;
   process.env.JEV_OFFLINE = "1";
   try {
@@ -650,9 +738,17 @@ test("two paid roads do not outrank a third road with no payable house", async (
     state.current = me.id;
     state.turn = 1;
 
+    const lane = legalActions(state)
+      .filter((action) => action.type === "BUILD_ROAD")
+      .map((action) => ({ action, target: roadOpenSettlementTarget(state, action, 3) }))
+      .filter(({ target }) => target.value >= 45 && target.depth <= 2 && !target.contested)
+      .sort((a, b) => heuristicScore(state, b.action) - heuristicScore(state, a.action))[0];
+    assert.ok(lane, "fixture should expose a valuable, uncontested settlement lane");
+    assert.equal(roadReservesExpansionLane(state, lane.action), true);
+
     const rec = await decide(state);
-    assert.notEqual(rec.action.type, "BUILD_ROAD");
-    assert.equal(rec.action.type, "MARITIME_TRADE");
+    assert.equal(rec.action.type, "BUILD_ROAD");
+    assert.equal(rec.action.edge, lane.action.edge);
   } finally {
     if (previousOffline === undefined) delete process.env.JEV_OFFLINE;
     else process.env.JEV_OFFLINE = previousOffline;
@@ -683,6 +779,7 @@ test("a road ending at an opponent settlement is treated as a dead zone", () => 
   const endTurn = legalActions(state).find((action) => action.type === "END_TURN");
   assert.ok(road);
   assert.ok(endTurn);
+  assert.equal(roadOpenSettlementTarget(state, road, 3).value, 0);
   assert.ok(roadExpansionScore(state, road) < 0);
   assert.ok(heuristicScore(state, road) < heuristicScore(state, endTurn));
 });
@@ -716,24 +813,12 @@ test("Longest Road planner values a bridge between two short road islands", () =
   assert.ok(heuristicScore(state, bridge) > heuristicScore(state, endTurn));
 });
 
-test("Road Building is proof-gated when it cannot reach a house or secure Longest Road", () => {
+test("Road Building is rejected when no house lane has a resource source and no award is secure", () => {
   const state = newGame({ playerCount: 4 }, { seed: 1, us: "red" });
   const me = state.players[0];
-  const opponent = state.players[1];
-  me.settlements = ["0,-1|0,0|1,-1"];
-  me.roads = [
-    "-1,0|0,-1|0,0|0,-1|0,0|1,-1",
-    "-1,0|-1,1|0,0|-1,0|0,-1|0,0",
-  ];
+  me.settlements = [Object.keys(state.board.vertices)[0]];
   me.devs.road_building = 1;
-  me.hand = { wood: 1, brick: 1, sheep: 1, wheat: 0, ore: 0 };
-  opponent.roads = [
-    "2,-1|2,-2|3,-2|2,-1|3,-1|3,-2",
-    "2,-1|2,0|3,-1|2,-1|3,-1|3,-2",
-    "1,0|2,-1|2,0|2,-1|2,0|3,-1",
-    "1,-1|1,0|2,-1|1,0|2,-1|2,0",
-    "0,0|1,-1|1,0|0,0|1,0|2,-1",
-  ];
+  me.hand = { wood: 0, brick: 0, sheep: 0, wheat: 0, ore: 0 };
   state.phase = "turn";
   state.current = me.id;
 
@@ -766,6 +851,56 @@ test("Road Building proof accepts an immediate secure bridge award", () => {
   const roadBuilding = legalActions(state).find((action) => action.type === "PLAY_ROAD_BUILDING");
   assert.ok(roadBuilding);
   assert.equal(roadBuildingHasStrategicProof(state), true);
+});
+
+test("forced-win search finds a two-road Longest Road win from Road Building", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const anchors = ["-1,-1|-1,-2|0,-2", "1,-2|2,-2|2,-3"];
+  me.settlements = [];
+  me.cities = [...anchors, ...Object.keys(state.board.vertices).filter((vertex) => !anchors.includes(vertex)).slice(0, 2)];
+  me.roads = [
+    "-1,-1|0,-1|0,-2|0,-1|0,-2|1,-2",
+    "-1,-1|-1,-2|0,-2|-1,-1|0,-1|0,-2",
+    "0,-2|1,-2|1,-3|1,-2|1,-3|2,-3",
+    "1,-2|1,-3|2,-3|1,-2|2,-2|2,-3",
+  ];
+  me.devs.road_building = 1;
+  me.hand = { wood: 0, brick: 0, sheep: 0, wheat: 0, ore: 0 };
+  state.phase = "roll";
+  state.current = me.id;
+  state.longestRoad = null;
+  state.largestArmy = null;
+
+  assert.equal(totalVP(state, me.id), 8);
+  assert.equal(forcedWin(state)?.type, "PLAY_ROAD_BUILDING");
+});
+
+test("Road Building accepts a supported uncontested settlement lane even when the house is not payable", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  const first = vertices[0];
+  const second = vertices.find((vertex) => vertex !== first && !state.board.vertices[first].edges.some((edge) =>
+    state.board.edges[edge].vertices.includes(vertex),
+  ));
+  assert.ok(second);
+  me.settlements = [first, second];
+  me.roads = [state.board.vertices[first].edges[0]];
+  me.roads.push(roadSpots(state, me)[0]);
+  me.devs.road_building = 1;
+  // The pair will expose a valuable third-house route. Wheat, wood, and brick
+  // are absent from hand but all have visible production sources.
+  me.hand = { wood: 0, brick: 0, sheep: 1, wheat: 0, ore: 0 };
+  state.phase = "turn";
+  state.current = me.id;
+
+  const roadBuilding = legalActions(state).find((action) => action.type === "PLAY_ROAD_BUILDING");
+  const endTurn = legalActions(state).find((action) => action.type === "END_TURN");
+  assert.ok(roadBuilding);
+  assert.ok(endTurn);
+  assert.equal(roadBuildingHasStrategicProof(state), true);
+  assert.ok(heuristicScore(state, roadBuilding) > heuristicScore(state, endTurn));
 });
 
 test("an unsecured Longest Road race does not justify a road before a house is payable", () => {
