@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { applyLogEvent } from "../src/colonist/apply.ts";
 import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
-import { applyAction, newGame, legalActions, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
+import { applyAction, newGame, legalActions, roadLength, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
 import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, openingResourceResilience, roadBuildingHasStrategicProof, roadExpansionScore, roadOpenSettlementTarget, roadReservesExpansionLane, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
 import { decide } from "../src/policy/jev.ts";
@@ -874,6 +874,67 @@ test("forced-win search finds a two-road Longest Road win from Road Building", (
 
   assert.equal(totalVP(state, me.id), 8);
   assert.equal(forcedWin(state)?.type, "PLAY_ROAD_BUILDING");
+});
+
+test("forced-win search simulates a paid road that joins two networks for Longest Road", () => {
+  const state = newGame({ playerCount: 4, victoryPoints: 10 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const opponent = state.players[1];
+  const bridge = "-1,-1|-1,-2|0,-2|-1,-2|0,-2|0,-3";
+  me.roads = [
+    "0,-1|0,-2|1,-2|0,-2|1,-2|1,-3",
+    "0,-2|0,-3|1,-3|0,-2|1,-2|1,-3",
+    "-1,-2|0,-2|0,-3|0,-2|0,-3|1,-3",
+    "-1,-1|-1,-2|0,-2|-1,-1|0,-1|0,-2",
+    "-1,-1|-1,0|0,-1|-1,-1|0,-1|0,-2",
+    "-1,-1|-1,0|-2,0|-1,-1|-1,0|0,-1",
+  ];
+  opponent.roads = [
+    "0,-1|0,-2|1,-2|0,-1|1,-1|1,-2",
+    "0,-1|1,-1|1,-2|1,-1|1,-2|2,-2",
+    "1,-1|1,-2|2,-2|1,-2|2,-2|2,-3",
+    "1,-2|1,-3|2,-3|1,-2|2,-2|2,-3",
+    "0,-2|1,-2|1,-3|1,-2|1,-3|2,-3",
+  ];
+  const ownPathVertices = [
+    "0,-1|0,-2|1,-2",
+    "0,-2|1,-2|1,-3",
+    "0,-2|0,-3|1,-3",
+    "-1,-2|0,-2|0,-3",
+    "-1,-1|-1,-2|0,-2",
+    "-1,-1|0,-1|0,-2",
+    "-1,-1|-1,0|0,-1",
+    "-1,-1|-1,0|-2,0",
+  ];
+  const opponentPathVertices = [
+    "0,-1|1,-1|1,-2",
+    "1,-1|1,-2|2,-2",
+    "1,-2|2,-2|2,-3",
+    "1,-2|1,-3|2,-3",
+    "0,-2|1,-2|1,-3",
+  ];
+  const usedVertices = new Set([...ownPathVertices, ...opponentPathVertices]);
+  const spareVertices = Object.keys(state.board.vertices).filter((vertex) => !usedVertices.has(vertex));
+  me.settlements = [ownPathVertices[0], ownPathVertices[4], ...spareVertices.slice(0, 2)];
+  me.cities = spareVertices.slice(2, 4);
+  me.hand = { wood: 1, brick: 1, sheep: 0, wheat: 0, ore: 0 };
+  state.longestRoad = opponent.id;
+  state.current = me.id;
+  state.phase = "turn";
+  state.turn = 1;
+
+  assert.equal(totalVP(state, me.id), 8);
+  assert.equal(roadLength(state, me.id), 3);
+  assert.equal(roadLength(state, opponent.id), 5);
+  const bridgeAction = legalActions(state).find((action) => action.type === "BUILD_ROAD" && action.edge === bridge);
+  assert.ok(bridgeAction);
+
+  const winningAction = forcedWin(state);
+  assert.equal(winningAction?.type, "BUILD_ROAD");
+  assert.ok(winningAction);
+  const won = applyAction(structuredClone(state), winningAction, () => 0.5);
+  assert.equal(won.longestRoad, me.id);
+  assert.equal(won.winner, me.id);
 });
 
 test("Road Building accepts a supported uncontested settlement lane even when the house is not payable", () => {

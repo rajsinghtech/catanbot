@@ -1903,11 +1903,17 @@ export function forcedWin(state: GameState): Action | null {
       if (totalVP(state, p.id) + gain >= state.config.victoryPoints) return a;
     }
     if (a.type === "BUILD_ROAD" && state.longestRoad !== a.player) {
-      if (totalVP(state, a.player) + 2 >= state.config.victoryPoints) {
-        const len = roadLength(state, a.player);
-        const held = state.longestRoad ? roadLength(state, state.longestRoad) : 4;
-        if (len + 1 > held && len + 1 >= 5) return a;
+      if (totalVP(state, a.player) + 2 < state.config.victoryPoints) continue;
+      // One road can join two separate networks, so the longest path may jump
+      // by several edges. Simulate the legal placement instead of assuming it
+      // adds exactly one to the current maximum.
+      const next = cloneState(state);
+      try {
+        applyAction(next, a, () => 0.5);
+      } catch {
+        continue;
       }
+      if (next.winner === a.player) return a;
     }
     if (a.type === "PLAY_KNIGHT" && knightWouldTakeLargestArmy(state, a.player)) {
       // Largest Army is a hidden two-VP swing just like Longest Road. A
