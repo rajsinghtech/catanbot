@@ -1736,6 +1736,8 @@ function discardBoardValue(state: GameState, action: Action): number {
   const cityValue = cityUpgradeValue(state, action.player);
   const activeProduction = production(state, action.player);
   const replaceableProduction = potentialProduction(state, action.player);
+  const cityMissing = costDistance(me.hand, COSTS.city);
+  const cityOreReserve = me.settlements.length > 0 && me.hand.ore >= COSTS.city.ore;
   let score = 0;
 
   const goals: Array<{ cost: Hand; weight: number; available: boolean }> = [
@@ -1781,6 +1783,16 @@ function discardBoardValue(state: GameState, action: Action): number {
     score += (preserveExpansion ? 12 : 42) + cityValue * 0.22;
   }
   if (openRoad && canPay(after, COSTS.road)) score += 18;
+
+  // Do not throw away the ore reserve for a city merely because wheat has not
+  // arrived yet. A productive wheat board can repair that hinge; an oreless
+  // board cannot replace three ore at all. This is especially important with
+  // one settlement left: the old last-settlement guard preferred keeping
+  // every expansion card and could discard four ore, leaving no legal city
+  // conversion and no road/house core either.
+  if (cityOreReserve && after.ore < COSTS.city.ore && cityMissing > 0) {
+    score -= (COSTS.city.ore - after.ore) * 22;
+  }
 
   const boardProduction = RESOURCES.reduce((sum, resource) => sum + boardPips(state, resource), 0);
   const averageBoardPips = boardProduction / RESOURCES.length;
@@ -2393,7 +2405,14 @@ export function heuristicScore(state: GameState, action: Action): number {
       s += 5;
       s += discardBoardValue(state, action);
       const nearWinExpansion = me.settlements.length === 0 && totalVP(state, us) >= state.config.victoryPoints - 1;
-      const preserveLastExpansion = me.settlements.length <= 1 && me.cities.length > 0 && settlementSpots(state, me, true).length > 0;
+      const discardCityMissing = costDistance(me.hand, COSTS.city);
+      const preserveLastExpansion = me.settlements.length <= 1 && me.cities.length > 0 &&
+        settlementSpots(state, me, true).length > 0 &&
+        // If the last settlement is still present but the city engine is one
+        // production hinge short, keep the ore reserve and let the board
+        // repair wheat/ore over the next roll. The expansion-only override is
+        // for a complete city hand or a hand that is not a live city route.
+        !(discardCityMissing > 0 && discardCityMissing <= 2 && me.hand.ore >= COSTS.city.ore);
       const preserveOpeningExpansion = funnel.active &&
         me.settlements.length < 5 &&
         settlementSpots(state, me, true).length > 0;

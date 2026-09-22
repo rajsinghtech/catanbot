@@ -498,6 +498,25 @@ test("a one-settlement city engine keeps expansion cards during discard", () => 
   assert.equal(best.discard?.ore, 4);
 });
 
+test("a one-settlement city engine keeps the exact ore reserve while the board supplies wheat", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  me.settlements = [vertices[0]];
+  me.cities = [vertices[10], vertices[20]];
+  me.roads = Object.keys(state.board.edges).slice(0, 4);
+  me.hand = { wood: 0, brick: 3, sheep: 0, wheat: 0, ore: 5 };
+  state.phase = "discard";
+  state.current = me.id;
+  state.mustDiscard[me.id] = 4;
+
+  const discards = legalActions(state).filter((action) => action.type === "DISCARD");
+  const best = discards.slice().sort((a, b) => heuristicScore(state, b) - heuristicScore(state, a))[0];
+  assert.ok(best);
+  assert.equal(best.discard?.brick, 2);
+  assert.equal(best.discard?.ore, 2);
+});
+
 test("the expansion funnel trades toward a road instead of a dev-card unlock", () => {
   const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
   const me = state.players[0];
