@@ -393,14 +393,28 @@ def run(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"bridge returned illegal action index {index}/{len(playable_actions)}")
             if args.trace:
                 chosen = playable_actions[index]
+                us_snapshot = next(
+                    player for player in request["players"] if player["id"] == request["us"]
+                )
                 self.trace.append({
                     "turn": int(game.state.num_turns),
                     "prompt": game.state.current_prompt.name,
                     "phase": request["phase"],
                     "chosen": chosen.action_type.name,
                     "value": repr(chosen.value),
+                    "trade": request["actions"][index].get("trade"),
                     "source": recommendation.get("source", "unknown"),
                     "reason": recommendation.get("reason", ""),
+                    "scores": recommendation.get("debugScores"),
+                    "hand": us_snapshot.get("hand", {}),
+                    "pieces": {
+                        "settlements": len(us_snapshot.get("settlements", [])),
+                        "cities": len(us_snapshot.get("cities", [])),
+                        "roads": len(us_snapshot.get("roads", [])),
+                    },
+                    "publicVp": int(game.state.player_state[
+                        f"P{game.state.color_to_index[self.color]}_VICTORY_POINTS"
+                    ]),
                 })
             return playable_actions[index]
 

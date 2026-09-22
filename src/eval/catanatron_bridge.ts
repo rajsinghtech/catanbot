@@ -373,12 +373,33 @@ export async function chooseCatanatronAction(input: CatanatronRequest): Promise<
     });
   }
   if (index == null || index < 0) index = 0;
+  const debugScores = process.env.CATANBOT_DEBUG_SCORES === "1"
+    ? input.actions.map((source, i) => {
+        const candidate = mapped[i];
+        return {
+          index: i,
+          type: source.type,
+          value: source.trade ?? (source.type === "MARITIME_TRADE"
+            ? { give: source.give, giveCount: source.giveCount, get: source.get }
+            : source.vertex ?? source.edge ?? source.resource ?? source.resources ?? null),
+          score: candidate ? heuristicScore(state, candidate) : null,
+        };
+      })
+    : undefined;
   return {
     index,
     action: input.actions[index],
     recommendation: recommendation
-      ? { ...recommendation, action: { ...recommendation.action } }
-      : { source: "fallback", reason: "No equivalent local action; preserved Catanatron legality." },
+      ? {
+          ...recommendation,
+          action: { ...recommendation.action },
+          ...(debugScores ? { debugScores } : {}),
+        }
+      : {
+          source: "fallback",
+          reason: "No equivalent local action; preserved Catanatron legality.",
+          ...(debugScores ? { debugScores } : {}),
+        },
   };
 }
 

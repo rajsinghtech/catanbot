@@ -372,11 +372,16 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
   if (action.type !== "BUILD_ROAD" || state.phase === "road_building") return true;
   const plan = longestRoadPlanScore(state, action);
   if ((plan.claimNow && plan.secureNow) || plan.defendNow) return true;
-  if (plan.claimSoon && plan.secureSoon && (plan.roadsToGoal ?? 99) <= 2) return true;
   const me = state.players.find((player) => player.id === action.player);
-  if ((me?.settlements.length ?? 0) === 2 && (me?.cities.length ?? 0) === 0 && settlementRouteAfterRoad(state, action) > 0) {
+  if ((me?.settlements.length ?? 0) + (me?.cities.length ?? 0) === 2 && settlementRouteAfterRoad(state, action) > 0) {
     return true;
   }
+  // A two-road forecast is not a secure award. The opponent gets a turn
+  // between those roads and can extend, cut, or take the same route. Treating
+  // `claimSoon` as proof was the losing pattern in simulation: the bot spent
+  // its wood/brick on a pretty chain, then had no city/settlement engine. A
+  // future race may still win through the normal score when no conversion is
+  // available, but it must not override a non-road action here.
   // A fresh frontier can justify the first few roads, but once three paid
   // roads are down the network must prove an actual award swing or immediate
   // settlement route before consuming another wood/brick pair. This keeps a

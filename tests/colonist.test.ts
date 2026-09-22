@@ -279,6 +279,77 @@ test("two-settlement funnel prefers a road route over spending the near-house ha
   assert.ok(heuristicScore(state, road) > heuristicScore(state, buyDev));
 });
 
+test("a city does not disable the road-to-third-house funnel", () => {
+  const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  const first = vertices[0];
+  const second = vertices.find((vertex) => vertex !== first && !state.board.vertices[first].edges.some((edge) =>
+    state.board.edges[edge].vertices.includes(vertex),
+  ));
+  assert.ok(second);
+  me.settlements = [first];
+  me.cities = [second];
+  me.roads = [state.board.vertices[first].edges[0]];
+  me.hand = { wood: 1, brick: 1, sheep: 1, wheat: 1, ore: 1 };
+  state.phase = "turn";
+  state.current = me.id;
+  state.turn = 1;
+
+  const road = legalActions(state).find(
+    (action) => action.type === "BUILD_ROAD" && settlementRouteAfterRoad(state, action) > 0,
+  );
+  const buyDev = legalActions(state).find((action) => action.type === "BUY_DEV");
+  assert.ok(road);
+  assert.ok(buyDev);
+  assert.ok(heuristicScore(state, road) > heuristicScore(state, buyDev));
+});
+
+test("Year of Plenty completes a build route instead of taking the first pair", () => {
+  const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  me.settlements = [Object.keys(state.board.vertices)[0]];
+  me.roads = [state.board.vertices[me.settlements[0]].edges[0]];
+  me.hand = { wood: 1, brick: 1, sheep: 0, wheat: 2, ore: 1 };
+  state.phase = "year_of_plenty";
+  state.current = me.id;
+  state.pendingYop = 2;
+
+  const options = legalActions(state).filter((action) => action.type === "PLAY_YEAR_OF_PLENTY");
+  const sheepOre = options.find((action) => action.resources?.join(":") === "sheep:ore");
+  const woodOre = options.find((action) => action.resources?.join(":") === "wood:ore");
+  assert.ok(sheepOre);
+  assert.ok(woodOre);
+  assert.ok(heuristicScore(state, sheepOre) > heuristicScore(state, woodOre));
+});
+
+test("the expansion funnel trades toward a road instead of a dev-card unlock", () => {
+  const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  const first = vertices[0];
+  const second = vertices.find((vertex) => vertex !== first && !state.board.vertices[first].edges.some((edge) =>
+    state.board.edges[edge].vertices.includes(vertex),
+  ));
+  assert.ok(second);
+  me.settlements = [first, second];
+  me.roads = [state.board.vertices[first].edges[0]];
+  me.hand = { wood: 1, brick: 0, sheep: 0, wheat: 1, ore: 5 };
+  state.phase = "turn";
+  state.current = me.id;
+  state.turn = 1;
+
+  const oreToBrick = legalActions(state).find((action) =>
+    action.type === "MARITIME_TRADE" && action.give === "ore" && action.get === "brick",
+  );
+  const oreToSheep = legalActions(state).find((action) =>
+    action.type === "MARITIME_TRADE" && action.give === "ore" && action.get === "sheep",
+  );
+  assert.ok(oreToBrick);
+  assert.ok(oreToSheep);
+  assert.ok(heuristicScore(state, oreToBrick) > heuristicScore(state, oreToSheep));
+});
+
 test("won the game log sets the Colonist winner", () => {
   const state = newGame({ playerCount: 4 }, { seed: 4, names: ["Izak", "Lise", "Zuzana", "Ru"], us: "red" });
   applyLogEvent(state, parseLogLine("Izak won the game"));

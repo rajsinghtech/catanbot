@@ -255,7 +255,12 @@ function thirdSettlementFunnel(state: GameState, id: string): {
   bestRoadRoute: number;
 } {
   const me = player(state, id);
-  const active = me.settlements.length === 2 && me.cities.length === 0;
+  // A city replaces a settlement in the state arrays, but it does not erase
+  // the two-building opening milestone. Keep the funnel active at one house
+  // plus one city as well: otherwise the first city accidentally authorizes a
+  // dev-card loop while the player is still missing the road-to-third-house
+  // conversion.
+  const active = me.settlements.length + me.cities.length === 2;
   if (!active) {
     return { active: false, missing: 99, cityMissing: 99, reachableValue: 0, bestRoadRoute: 0 };
   }
@@ -638,21 +643,56 @@ function roadBuildingValue(state: GameState, us: string): number {
   return bestFirst.score + second * 0.72 + (house > 0 ? house * 0.34 : -8) + award.value * 0.65;
 }
 
+function yearOfPlentyActionValue(state: GameState, action: Action): number {
+  const me = player(state, action.player);
+  const resources = action.resources ?? (action.resource ? [action.resource] : []);
+  if (!resources.length) return yearOfPlentyValue(state, action.player);
+  const after = { ...me.hand };
+  for (const resource of resources.slice(0, 2)) after[resource] += 1;
+  const unlock = unlockLabel(me.hand, after);
+  const unlockScore = unlock === "city" ? 66 : unlock === "settlement" ? 56 : unlock === "dev card" ? 26 : unlock === "road" ? 20 : 0;
+  let score = 14 + unlockScore;
+
+  // Year of Plenty is a tempo card, not a generic wheat/ore bonus. Prefer the
+  // pair that completes the cheapest real route, especially the missing sheep
+  // or expansion card that turns an existing road into a settlement. The old
+  // branch scored only resource adjectives, which made every pair tie and
+  // caused the bridge to pick the first legal pair arbitrarily.
+  const beforeSettlement = costDistance(me.hand, COSTS.settlement);
+  const afterSettlement = costDistance(after, COSTS.settlement);
+  const beforeCity = costDistance(me.hand, COSTS.city);
+  const afterCity = costDistance(after, COSTS.city);
+  score += (beforeSettlement - afterSettlement) * 24;
+  score += (beforeCity - afterCity) * 18;
+  if (canPay(after, COSTS.settlement) && settlementSpots(state, me, false).length > 0) score += 58;
+  if (canPay(after, COSTS.city) && me.settlements.length > 0) score += 70;
+
+  for (const resource of resources) {
+    if (me.hand[resource] === 0) score += 11;
+    if (resource === "wheat" || resource === "ore") score += 5;
+    if (resource === "wood" || resource === "brick") score += 3;
+  }
+  if (me.settlements.length + me.cities.length === 2 && afterSettlement < beforeSettlement) score += 18;
+  return score;
+}
+
 function yearOfPlentyValue(state: GameState, us: string): number {
-  const me = player(state, us);
   let best = 0;
   for (const a of RESOURCES) {
     if (state.bank[a] <= 0) continue;
     for (const b of RESOURCES) {
       if (state.bank[b] - (a === b ? 1 : 0) <= 0) continue;
-      const after = { ...me.hand, [a]: me.hand[a] + 1, [b]: me.hand[b] + 1 };
-      const unlock = unlockLabel(me.hand, after);
-      const unlockScore = unlock === "city" ? 58 : unlock === "settlement" ? 48 : unlock === "dev card" ? 28 : unlock === "road" ? 18 : 0;
-      const quality = (a === "wheat" || a === "ore" ? 7 : 3) + (b === "wheat" || b === "ore" ? 7 : 3);
-      best = Math.max(best, unlockScore + quality);
+      best = Math.max(best, yearOfPlentyActionValue(state, {
+        id: `YOP:${a}:${b}`,
+        type: "PLAY_YEAR_OF_PLENTY",
+        player: us,
+        resource: a,
+        resources: [a, b],
+        label: `Year of Plenty ${a} + ${b}`,
+      }));
     }
   }
-  return 14 + best;
+  return best || 14;
 }
 
 function placeForEstimate(state: GameState, id: string, vertex: string): void {
@@ -995,6 +1035,61 @@ function opponentIsDangerous(state: GameState, id: string): boolean {
   );
 }
 
+/**
+ * A small post-action position model borrowed from the useful part of the
+ * Catanatron value player: score the state after the move, not only the
+ * label attached to the move.  This catches the difference between a city on
+ * a productive wheat/ore corner and a city that merely satisfies the cost,
+ * and between a road that opens settlement production and a road that only
+ * lengthens an unsecured chain.
+ */
+function positionValue(state: GameState, id: string): number {
+  const me = player(state, id);
+  const prod = production(state, id);
+  const opponents = state.players.filter((p) => p.id !== id);
+  const ownProduction = prod.wood + prod.brick + prod.sheep * 0.9 + prod.wheat * 1.15 + prod.ore * 1.1;
+  const enemyProduction = opponents.reduce((sum, opponent) => {
+    const theirs = production(state, opponent.id);
+    return sum + theirs.wood + theirs.brick + theirs.sheep * 0.9 + theirs.wheat * 1.15 + theirs.ore * 1.1;
+  }, 0);
+  const cityDistance = (Math.max(0, COSTS.city.wheat - me.hand.wheat) + Math.max(0, COSTS.city.ore - me.hand.ore)) / 5;
+  const settlementDistance = (
+    Math.max(0, COSTS.settlement.wood - me.hand.wood) +
+    Math.max(0, COSTS.settlement.brick - me.hand.brick) +
+    Math.max(0, COSTS.settlement.sheep - me.hand.sheep) +
+    Math.max(0, COSTS.settlement.wheat - me.hand.wheat)
+  ) / 4;
+  const handSynergy = (2 - cityDistance - settlementDistance) / 2;
+  const ownedHexes = new Set<string>();
+  for (const vertex of [...me.settlements, ...me.cities]) {
+    for (const hex of state.board.vertices[vertex]?.hexes ?? []) ownedHexes.add(hex);
+  }
+  const devCount = me.devs.knight + me.devs.monopoly + me.devs.year_of_plenty + me.devs.road_building + me.devs.vp;
+  return totalVP(state, id) * 44
+    + ownProduction * 2.2
+    - enemyProduction * 0.22
+    + settlementSpots(state, me, false).length * 0.7
+    + bestReachableSettlementValue(state, id) * 0.08
+    + ownedHexes.size * 0.25
+    + roadLength(state, id) * 0.22
+    + handSynergy * 8
+    + handSize(me) * 0.08
+    + devCount * 1.4
+    + me.knightsPlayed * 1.1;
+}
+
+function postActionPositionDelta(state: GameState, action: Action): number {
+  if (["ROLL", "END_TURN", "DISCARD", "STEAL"].includes(action.type)) return 0;
+  try {
+    const before = positionValue(state, action.player);
+    const after = cloneState(state);
+    applyAction(after, action, () => 0.5);
+    return positionValue(after, action.player) - before;
+  } catch {
+    return 0;
+  }
+}
+
 export function heuristicScore(state: GameState, action: Action): number {
   const us = action.player;
   const me = player(state, us);
@@ -1011,6 +1106,7 @@ export function heuristicScore(state: GameState, action: Action): number {
   // heuristics.  A good self-build is still secondary when a settlement,
   // road cut, or other legal action removes an opponent's immediate VP path.
   s += defensiveThreatDelta(state, action);
+  s += postActionPositionDelta(state, action);
 
   switch (action.type) {
     case "PLACE_SETTLEMENT":
@@ -1236,11 +1332,7 @@ export function heuristicScore(state: GameState, action: Action): number {
       break;
     case "PLAY_YEAR_OF_PLENTY": {
       if (action.resources?.length || action.resource) {
-        s += 14;
-        for (const r of action.resources ?? (action.resource ? [action.resource] : [])) {
-          if (r === "wheat" || r === "ore") s += 8;
-          else if (r === "brick" || r === "wood") s += 4;
-        }
+        s += yearOfPlentyActionValue(state, action);
       } else {
         s += yearOfPlentyValue(state, us);
       }
@@ -1257,6 +1349,16 @@ export function heuristicScore(state: GameState, action: Action): number {
         else if (unlock === "settlement") s += 36;
         else if (unlock === "dev card") s += 24;
         else if (unlock === "road") s += 16;
+        if (funnel.active) {
+          // In the two-building expansion phase, a trade that unlocks a road
+          // or house is worth more than one that merely unlocks a dev card.
+          // The latter was a live/simulator failure: ore -> sheep completed a
+          // dev-card hand, while ore -> brick completed the road needed for
+          // the third settlement.
+          if (unlock === "settlement") s += 26;
+          else if (unlock === "road") s += 22;
+          else if (unlock === "dev card") s -= 18;
+        }
         if (o.give === "wheat" || o.give === "ore") s += 8;
         if ((o.get === "wheat" || o.get === "ore") && !unlock && strategicTradeValue(state, us, me.hand, after, o.give) < 8) s -= 12;
         const senderUnlock = opponentTradeUnlock(state, o);
@@ -1285,6 +1387,11 @@ export function heuristicScore(state: GameState, action: Action): number {
         else if (unlock === "settlement") s += 34;
         else if (unlock === "dev card") s += 22;
         else if (unlock === "road") s += 14;
+        if (funnel.active) {
+          if (unlock === "settlement") s += 26;
+          else if (unlock === "road") s += 22;
+          else if (unlock === "dev card") s -= 18;
+        }
 
         // A trade is often the preparatory move for a settlement already
         // reachable from the existing road network. Value that one-turn
