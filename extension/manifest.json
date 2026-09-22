@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Catanbot",
+  "version": "0.1.7",
+  "description": "Colonist advisor. Observes bot games; the CDP driver is the only auto-click actuator.",
+  "action": {
+    "default_title": "Catanbot",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["scripting", "tabs", "activeTab"],
+  "host_permissions": [
+    "https://colonist.io/*",
+    "https://www.colonist.io/*",
+    "http://127.0.0.1:8765/*",
+    "http://localhost:8765/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://colonist.io/*", "https://www.colonist.io/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://colonist.io/*", "https://www.colonist.io/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://colonist.io/*", "https://www.colonist.io/*"],
+      "js": ["attach.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

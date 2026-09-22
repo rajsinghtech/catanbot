@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Catanbot controls</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { width: 330px; margin: 0; padding: 15px; color: #17110b; background: #f3e2c4; font: 13px/1.4 system-ui, sans-serif; }
+  h1 { margin: 0; font: 24px Georgia, serif; }
+  h2 { margin: 16px 0 7px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: #6d5b3c; }
+  p { margin: 6px 0; color: #5f513b; }
+  button { width: 100%; margin-top: 7px; padding: 9px 10px; border: 0; border-radius: 5px; background: #d9a441; color: #17110b; font: inherit; font-weight: 600; cursor: pointer; }
+  button.secondary { background: #e7d6b7; }
+  button.danger { background: #b8432a; color: #fff7e8; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .status { margin-top: 12px; padding: 10px; border-radius: 6px; background: #e7d6b7; }
+  .status strong { display: block; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+  .grid button { margin-top: 0; }
+  .hint { font-size: 11px; }
+  .ok { color: #2d6d3d; }
+  .warn { color: #9a3e28; }
+  details { margin-top: 13px; }
+  summary { cursor: pointer; color: #6d5b3c; font-weight: 600; }
+  ul { padding-left: 18px; margin: 7px 0 0; color: #5f513b; font-size: 11px; }
+</style>
+<h1>Catanbot</h1>
+<p>Attach the active Colonist tab. Recommendations use its authoritative board and menu state.</p>
+
+<div class="status">
+  <strong id="state">Bridge offline</strong>
+  <span id="match">Start the local server at 127.0.0.1:8765.</span>
+</div>
+
+<button id="attach">Attach active Colonist tab</button>
+
+<h2>Automation</h2>
+<button id="recommend" class="secondary">Recommendation-only · any match</button>
+<button id="bots">Auto-play bot match</button>
+<button id="off" class="danger">Turn auto off now</button>
+
+<h2>HUD</h2>
+<div class="grid">
+  <button id="showHud" class="secondary">Show in game</button>
+  <button id="hideHud" class="secondary">Hide in game</button>
+</div>
+<button id="open" class="secondary">Open full control panel</button>
+<p id="out" class="hint"></p>
+
+<details>
+  <summary>What is supported?</summary>
+  <ul>
+    <li>Dice, end turn, builds, development cards, maritime trades, and trade responses.</li>
+    <li>Discard, robber movement, stealing, setup settlement, and setup road.</li>
+    <li>Auto-click remains gated to non-ranked bot matches; live/ranked matches stay recommendation-only.</li>
+    <li>HUD starts hidden. Alt+Shift+C toggles it in the game tab.</li>
+  </ul>
+</details>
+<script src="popup.js"></script>

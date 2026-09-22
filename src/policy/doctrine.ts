@@ -1,0 +1,1157 @@
+import { COSTS, PIP, RESOURCES, type Action, type GameState, type Hand, type Resource } from "../types.ts";
+import {
+  applyAction,
+  cloneState,
+  handSize,
+  legalActions,
+  player,
+  roadLength,
+  roadSpots,
+  settlementSpots,
+  totalVP,
+  visibleVP,
+} from "../engine/game.ts";
+import { production } from "../engine/features.ts";
+import { resourceOf } from "../engine/map.ts";
+
+function canPay(h: Hand, cost: Hand): boolean {
+  return RESOURCES.every((r) => h[r] >= cost[r]);
+}
+
+function afterSwap(h: Hand, give: Resource, giveN: number, get: Resource, getN: number): Hand {
+  return { ...h, [give]: h[give] - giveN, [get]: h[get] + getN };
+}
+
+function unlockLabel(before: Hand, after: Hand): string | null {
+  if (!canPay(before, COSTS.city) && canPay(after, COSTS.city)) return "city";
+  if (!canPay(before, COSTS.settlement) && canPay(after, COSTS.settlement)) return "settlement";
+  if (!canPay(before, COSTS.dev) && canPay(after, COSTS.dev)) return "dev card";
+  if (!canPay(before, COSTS.road) && canPay(after, COSTS.road)) return "road";
+  return null;
+}
+
+const RESOURCE_STRATEGIC_WEIGHT: Record<Resource, number> = {
+  wood: 1,
+  brick: 1,
+  sheep: 0.96,
+  wheat: 1.22,
+  ore: 1.16,
+};
+
+function boardPips(state: GameState, resource: Resource): number {
+  return Object.values(state.board.hexes).reduce((sum, hex) => {
+    if (resourceOf(hex) !== resource || hex.number == null) return sum;
+    return sum + (PIP[hex.number] ?? 0);
+  }, 0);
+}
+
+function localPips(state: GameState, vertex: string, resource: Resource): number {
+  const v = state.board.vertices[vertex];
+  if (!v) return 0;
+  return v.hexes.reduce((sum, hid) => {
+    const hex = state.board.hexes[hid];
+    return resourceOf(hex) === resource && hex.number != null ? sum + (PIP[hex.number] ?? 0) : sum;
+  }, 0);
+}
+
+function placementWeight(state: GameState, id: string, resource: Resource, local: number): number {
+  const current = production(state, id)[resource];
+  const board = boardPips(state, resource);
+  const average = RESOURCES.reduce((sum, r) => sum + boardPips(state, r), 0) / RESOURCES.length;
+  const scarcity = average > 0 ? Math.max(0, Math.min(1, (average - board) / average)) : 0;
+  const coverage = current === 0 ? 1 : current < 5 ? 0.45 : 0;
+  // Wheat/ore support every major mid-game conversion, but a low-supply
+  // resource still gets value even when its pip count is not glamorous.
+  return RESOURCE_STRATEGIC_WEIGHT[resource] * (1 + coverage * 0.7 + scarcity * 0.18 + (local >= 4 ? 0.08 : 0));
+}
+
+function resourcePressure(state: GameState, id: string, resource: Resource): number {
+  const p = player(state, id);
+  let pressure = 0;
+  if (p.settlements.length > 0 && p.hand[resource] < COSTS.city[resource]) pressure += 1.2;
+  if (p.settlements.length < 5 && settlementSpots(state, p, false).length > 0 && p.hand[resource] < COSTS.settlement[resource]) {
+    pressure += 1.35;
+  }
+  if (state.deck.length > 0 && p.hand[resource] < COSTS.dev[resource]) pressure += 0.85;
+  if (p.hand[resource] < COSTS.road[resource]) pressure += resource === "wood" || resource === "brick" ? 0.75 : 0;
+  return pressure;
+}
+
+function opponentTradeUnlock(state: GameState, offer: NonNullable<GameState["pendingOffer"]>): string | null {
+  const sender = player(state, offer.from);
+  const after = afterSwap(sender.hand, offer.give, offer.giveCount, offer.get, offer.getCount);
+  return unlockLabel(sender.hand, after);
+}
+
+function costDistance(hand: Hand, cost: Hand): number {
+  return RESOURCES.reduce((sum, resource) => sum + Math.max(0, cost[resource] - hand[resource]), 0);
+}
+
+function strategicTradeValue(state: GameState, id: string, before: Hand, after: Hand, offered: Resource): number {
+  const me = player(state, id);
+  const goals: Array<[Hand, number]> = [
+    [COSTS.settlement, 15],
+    [COSTS.city, 13],
+    [COSTS.road, 9],
+    [COSTS.dev, 8],
+  ];
+  let value = 0;
+  for (const [cost, weight] of goals) value += (costDistance(before, cost) - costDistance(after, cost)) * weight;
+
+  const ownProduction = production(state, id);
+  if (ownProduction[offered] === 0) value += 15;
+  else if (ownProduction[offered] < 5) value += 7;
+  if ((offered === "wood" || offered === "brick") && bestReachableSettlementValue(state, id) > 0) value += 8;
+  if (offered === "wheat" || offered === "ore") value += 4;
+
+  // A trade is more valuable when it lowers the number of missing cards for a
+  // real, reachable target, not merely because the hand is larger afterward.
+  const reachable = bestReachableSettlementValue(state, id);
+  if (reachable > 0) {
+    const beforeMissing = costDistance(before, COSTS.settlement);
+    const afterMissing = costDistance(after, COSTS.settlement);
+    if (afterMissing < beforeMissing) value += reachable * 0.18;
+  }
+  if (me.settlements.length + me.cities.length === 2 && costDistance(after, COSTS.settlement) < costDistance(before, COSTS.settlement)) {
+    // Third settlement timing is a major competitive milestone; accept a
+    // preparatory trade even when it is not yet a same-turn build.
+    value += 12;
+  }
+  return value;
+}
+
+type StrategyProfile = "road" | "engine" | "port" | "balanced";
+
+function strategyProfile(state: GameState, id: string): StrategyProfile {
+  const p = player(state, id);
+  const prod = production(state, id);
+  const road = prod.wood + prod.brick;
+  const engine = prod.wheat * 1.1 + prod.ore * 1.25 + prod.sheep * 0.8;
+  const port = [...p.settlements, ...p.cities].reduce((sum, vertex) => {
+    const value = state.board.vertices[vertex]?.port;
+    if (!value) return sum;
+    if (value.ratio === 2 && value.resource) return sum + (prod[value.resource] >= 4 ? 12 : 2);
+    return sum + 3;
+  }, 0);
+  if (port >= 14 && port >= road * 0.7) return "port";
+  if (road >= engine * 1.18 && road >= 10) return "road";
+  if (engine >= road * 1.12 && engine >= 13) return "engine";
+  return "balanced";
+}
+
+function profileBias(state: GameState, action: Action): number {
+  if (state.phase === "setup_settle" || state.phase === "setup_road") return 0;
+  const profile = strategyProfile(state, action.player);
+  switch (action.type) {
+    case "BUILD_ROAD":
+    case "PLACE_ROAD":
+      return profile === "road" ? 8 : profile === "engine" ? -3 : 0;
+    case "BUILD_SETTLEMENT":
+      return profile === "road" || profile === "port" ? 5 : 2;
+    case "BUILD_CITY":
+      return profile === "engine" || profile === "port" ? 7 : 2;
+    case "BUY_DEV":
+      return profile === "engine" || profile === "port" ? 7 : 0;
+    case "MARITIME_TRADE":
+      return profile === "port" ? 5 : 0;
+    default:
+      return 0;
+  }
+}
+
+function diceCoverage(state: GameState, vertex: string): number {
+  const v = state.board.vertices[vertex];
+  if (!v) return 0;
+  const numbers = new Set<number>();
+  let duplicate = 0;
+  for (const hid of v.hexes) {
+    const number = state.board.hexes[hid]?.number;
+    if (number == null) continue;
+    if (numbers.has(number)) duplicate += 1;
+    numbers.add(number);
+  }
+  // A little number diversity reduces normal-dice variance; it should never
+  // outweigh a strong 6/8, so this remains a tie-break rather than a rule.
+  return numbers.size * 1.6 - duplicate * 1.2;
+}
+
+function bestRobberValueAfterKnight(state: GameState, us: string): number {
+  const sim = cloneState(state);
+  sim.current = us;
+  sim.phase = "robber";
+  sim.afterRobber = state.phase === "roll" ? "roll" : "turn";
+  const moves = legalActions(sim).filter((action) => action.type === "MOVE_ROBBER");
+  return Math.max(0, ...moves.map((action) => heuristicScore(sim, action)));
+}
+
+function settlementSpotValue(state: GameState, id: string, vertex: string): number {
+  const v = state.board.vertices[vertex];
+  if (!v) return -Infinity;
+  const prod = production(state, id);
+  const seen = new Set<Resource>();
+  let score = 0;
+  for (const hid of v.hexes) {
+    const hex = state.board.hexes[hid];
+    const resource = resourceOf(hex);
+    const pips = hex.number == null ? 0 : PIP[hex.number] ?? 0;
+    const weight = resource ? placementWeight(state, id, resource, pips) : 1;
+    score += pips * (3 + (resource === "wheat" || resource === "ore" ? 4 : 0)) * weight;
+    if (resource && prod[resource] === 0) score += 12 * RESOURCE_STRATEGIC_WEIGHT[resource];
+    else if (resource && prod[resource] < 5) score += (5 - prod[resource]) * 1.5 * RESOURCE_STRATEGIC_WEIGHT[resource];
+    if (resource && !seen.has(resource)) {
+      seen.add(resource);
+      score += 3 * RESOURCE_STRATEGIC_WEIGHT[resource];
+    }
+  }
+  score += diceCoverage(state, vertex);
+  if (v.port) {
+    if (v.port.ratio === 2 && v.port.resource) {
+      const aligned = localPips(state, vertex, v.port.resource);
+      // A matching 2:1 port is a conversion engine only when this corner can
+      // actually feed it. A weak, unaligned port should not beat production.
+      score += aligned >= 4 ? 18 : aligned > 0 ? 10 : 3;
+    } else {
+      score += 6;
+    }
+  }
+  return score;
+}
+
+function bestOpenSettlementValue(state: GameState, id: string): number {
+  const spots = settlementSpots(state, player(state, id), true);
+  return Math.max(0, ...spots.map((vertex) => settlementSpotValue(state, id, vertex)));
+}
+
+function bestReachableSettlementValue(state: GameState, id: string): number {
+  const spots = settlementSpots(state, player(state, id), false);
+  return Math.max(0, ...spots.map((vertex) => settlementSpotValue(state, id, vertex)));
+}
+
+function vertexOwner(state: GameState, vertex: string): string | undefined {
+  return state.players.find((p) => p.settlements.includes(vertex) || p.cities.includes(vertex))?.id;
+}
+
+/**
+ * Estimate how much territory a road opens for the next settlement.  A raw
+ * road count is a poor proxy: the useful road is the one that points at a
+ * legal, high-production intersection and still has alternatives behind it.
+ * This is deliberately a small bounded graph search so it stays cheap on the
+ * live 19-hex board.
+ */
+export function roadExpansionScore(state: GameState, action: Action): number {
+  if (!action.edge || !state.board.edges[action.edge]) return -Infinity;
+  const beforePlayer = player(state, action.player);
+  const edge = state.board.edges[action.edge];
+  const beforeNetwork = new Set<string>([
+    ...beforePlayer.settlements,
+    ...beforePlayer.cities,
+    ...beforePlayer.roads.flatMap((id) => state.board.edges[id]?.vertices ?? []),
+  ]);
+  const after = cloneState(state);
+  const afterPlayer = player(after, action.player);
+  if (!afterPlayer.roads.includes(action.edge)) afterPlayer.roads.push(action.edge);
+  const postRoadHand = { ...afterPlayer.hand };
+  if (action.type === "BUILD_ROAD" && state.phase !== "road_building") {
+    postRoadHand.wood -= COSTS.road.wood;
+    postRoadHand.brick -= COSTS.road.brick;
+  }
+  const canFinishSettlementAfterRoad = canPay(postRoadHand, COSTS.settlement);
+
+  // Setup roads have an explicit source house.  For normal roads, prefer the
+  // endpoint that is new to our network; scoring from the old network would
+  // make every branch look equally good and produced arbitrary-looking roads.
+  const fresh = edge.vertices.filter((vertex) => !beforeNetwork.has(vertex));
+  const starts = action.vertex && edge.vertices.includes(action.vertex)
+    ? edge.vertices.filter((vertex) => vertex !== action.vertex)
+    : fresh.length > 0
+      ? fresh
+      : edge.vertices;
+  const backtrack = action.vertex && edge.vertices.includes(action.vertex)
+    ? action.vertex
+    : fresh.length > 0
+      ? edge.vertices.find((vertex) => beforeNetwork.has(vertex))
+      : undefined;
+
+  const legalSettlementSpots = new Set(settlementSpots(after, afterPlayer, true));
+  const distance = new Map<string, number>();
+  const queue: Array<{ vertex: string; depth: number }> = [];
+  for (const vertex of starts) {
+    if (!distance.has(vertex)) {
+      distance.set(vertex, 0);
+      queue.push({ vertex, depth: 0 });
+    }
+  }
+  const maxDepth = 3;
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (current.depth >= maxDepth) continue;
+    const vertexState = after.board.vertices[current.vertex];
+    if (!vertexState) continue;
+    for (const edgeId of vertexState.edges) {
+      if (edgeId === action.edge && current.vertex !== starts[0]) continue;
+      const nextEdge = after.board.edges[edgeId];
+      if (!nextEdge) continue;
+      const next = nextEdge.vertices[0] === current.vertex ? nextEdge.vertices[1] : nextEdge.vertices[0];
+      const owner = vertexOwner(after, next);
+      // An opposing settlement is a hard road-network break.  Our own
+      // settlement/city is a valid connection point.
+      if (owner && owner !== action.player) continue;
+      if (next === backtrack && current.depth === 0) continue;
+      const roadOwner = after.players.find((p) => p.roads.includes(edgeId))?.id;
+      if (roadOwner && roadOwner !== action.player) continue;
+      const nextDepth = current.depth + 1;
+      if (nextDepth < (distance.get(next) ?? Infinity)) {
+        distance.set(next, nextDepth);
+        queue.push({ vertex: next, depth: nextDepth });
+      }
+    }
+  }
+
+  const targets = [...distance.entries()]
+    .filter(([vertex, depth]) => legalSettlementSpots.has(vertex) && depth <= maxDepth)
+    .map(([vertex, depth]) => ({ vertex, depth, value: settlementSpotValue(after, action.player, vertex) }))
+    .sort((a, b) => b.value - a.value || a.depth - b.depth);
+
+  // A frontier is not actually ours if an opponent can settle there first.
+  // Keep this deliberately conservative: it only counts spots that are
+  // already reachable from that opponent's road network, not speculative
+  // two-turn races.
+  const opponentFrontier = new Set<string>();
+  for (const opponent of after.players.filter((p) => p.id !== action.player)) {
+    for (const vertex of settlementSpots(after, opponent, false)) opponentFrontier.add(vertex);
+  }
+
+  let score = 0;
+  for (const target of targets.slice(0, 6)) {
+    const depthWeight = target.depth === 0 ? 2.8 : target.depth === 1 ? 1.35 : target.depth === 2 ? 0.62 : 0.24;
+    const contestedWeight = opponentFrontier.has(target.vertex) ? 0.35 : 1;
+    score += (target.value + 18) * depthWeight * contestedWeight;
+    if (canFinishSettlementAfterRoad) {
+      score += target.depth === 0 ? 30 : target.depth === 1 ? 16 : 6;
+    }
+  }
+  const immediate = targets.filter((target) => target.depth === 0);
+  if (immediate.length) {
+    score += 32 + Math.max(...immediate.map((target) => target.value)) * 0.9;
+    score += Math.min(2, immediate.length - 1) * 14;
+  } else if (targets.length === 0) {
+    // A road that points into an occupied corner or a closed rim is usually
+    // a tempo loss.  It can still be legal, so penalize rather than forbid it.
+    score -= 26;
+  } else {
+    score -= 8;
+  }
+
+  // Keep the frontier value on the same scale as a build action.  The raw
+  // sum above intentionally looks at several possible future intersections;
+  // using it unscaled made an ordinary road beat an immediately available
+  // settlement or city simply because it had many theoretical paths.
+  score *= 0.13;
+
+  const beforeLength = roadLength(state, action.player);
+  const afterLength = roadLength(after, action.player);
+  // Road length is useful as an expansion signal, but it is not itself the
+  // Longest Road award.  Award/race value is handled by
+  // longestRoadPlanScore below, where we can check whether the chain can be
+  // cut immediately.  Keeping that concern out of the frontier score stops a
+  // long but unsafe branch from beating a payable settlement.
+  score += (afterLength - beforeLength) * 14;
+
+  const opponentBestLength = Math.max(
+    0,
+    ...state.players.filter((p) => p.id !== action.player).map((p) => roadLength(state, p.id)),
+  );
+  const security = roadSecurity(after, action.player, afterLength);
+  if (security.blockers > 0) {
+    // An accessible settlement that breaks the claimed chain is a direct
+    // denial threat. Penalize the road even when it reaches five; otherwise
+    // the raw Longest Road bonus makes the bot repeatedly walk into traps.
+    score -= Math.min(38, security.maxDrop * 14 + security.blockers * 5);
+    if (afterLength >= 5 && security.worstLength < 5) score -= 28;
+    if (afterLength >= 5 && security.worstLength <= opponentBestLength) score -= 18;
+  }
+
+  // Taking an edge that an opponent currently needs is a meaningful cut,
+  // especially when they already have a road network worth contesting.
+  for (const opponent of state.players.filter((p) => p.id !== action.player)) {
+    if (!roadSpots(state, opponent).includes(action.edge)) continue;
+    const opponentLength = roadLength(state, opponent.id);
+    score += 5 + Math.min(18, opponentLength * 2);
+  }
+  return score;
+}
+
+function roadSecurity(state: GameState, us: string, afterLength: number): {
+  blockers: number;
+  maxDrop: number;
+  worstLength: number;
+} {
+  let blockers = 0;
+  let maxDrop = 0;
+  let worstLength = afterLength;
+  const seen = new Set<string>();
+  for (const opponent of state.players.filter((p) => p.id !== us)) {
+    for (const vertex of settlementSpots(state, opponent, false)) {
+      if (seen.has(vertex) || vertexOwner(state, vertex)) continue;
+      seen.add(vertex);
+      const blocked = cloneState(state);
+      const blocker = player(blocked, opponent.id);
+      blocker.settlements.push(vertex);
+      const blockedLength = roadLength(blocked, us);
+      if (blockedLength >= afterLength) continue;
+      blockers += 1;
+      maxDrop = Math.max(maxDrop, afterLength - blockedLength);
+      worstLength = Math.min(worstLength, blockedLength);
+    }
+  }
+  return { blockers, maxDrop, worstLength };
+}
+
+export interface LongestRoadPlan {
+  immediateLength: number;
+  bestLength: number;
+  opponentLength: number;
+  roadsToGoal: number | null;
+  claimNow: boolean;
+  secureNow: boolean;
+  claimSoon: boolean;
+  secureSoon: boolean;
+  defendNow: boolean;
+  value: number;
+}
+
+type RoadPlanNode = { state: GameState; path: string[] };
+
+function addRoadForPlan(state: GameState, us: string, edge: string, pay: boolean): GameState {
+  const next = cloneState(state);
+  const p = player(next, us);
+  if (!p.roads.includes(edge)) p.roads.push(edge);
+  if (pay) {
+    p.hand.wood = Math.max(0, p.hand.wood - COSTS.road.wood);
+    p.hand.brick = Math.max(0, p.hand.brick - COSTS.road.brick);
+  }
+  return next;
+}
+
+function roadPlanExtensions(node: RoadPlanNode, us: string): RoadPlanNode[] {
+  const p = player(node.state, us);
+  const candidates = roadSpots(node.state, p)
+    .filter((edge) => !node.path.includes(edge))
+    .map((edge) => {
+      const next = addRoadForPlan(node.state, us, edge, false);
+      const nextLength = roadLength(next, us);
+      const nextOptions = roadSpots(next, player(next, us)).length;
+      return { edge, next, nextLength, nextOptions };
+    })
+    .sort((a, b) => b.nextLength - a.nextLength || b.nextOptions - a.nextOptions || a.edge.localeCompare(b.edge))
+    .slice(0, 5);
+  return candidates.map(({ edge, next }) => ({ state: next, path: [...node.path, edge] }));
+}
+
+/**
+ * Evaluate a road as part of an actual Longest Road race.  The search is
+ * intentionally shallow: one road is the move being considered and two
+ * more roads are enough to catch the common endgame swing without putting a
+ * network request or a large graph search on the live action path.
+ */
+export function longestRoadPlanScore(state: GameState, action: Action): LongestRoadPlan {
+  const us = action.player;
+  const opponentLength = Math.max(
+    0,
+    ...state.players.filter((p) => p.id !== us).map((p) => roadLength(state, p.id)),
+  );
+  const beforeLength = roadLength(state, us);
+  const noPlan: LongestRoadPlan = {
+    immediateLength: beforeLength,
+    bestLength: beforeLength,
+    opponentLength,
+    roadsToGoal: null,
+    claimNow: false,
+    secureNow: false,
+    claimSoon: false,
+    secureSoon: false,
+    defendNow: false,
+    value: 0,
+  };
+  if (action.type !== "BUILD_ROAD" || !action.edge || !state.board.edges[action.edge]) return noPlan;
+
+  const first = addRoadForPlan(state, us, action.edge, state.phase !== "road_building");
+  const immediateLength = roadLength(first, us);
+  const target = Math.max(5, opponentLength + 1);
+  if (state.longestRoad === us && opponentLength < beforeLength) {
+    return { ...noPlan, immediateLength, bestLength: immediateLength, value: -22 };
+  }
+  const nearRace = beforeLength >= 3 || opponentLength >= 4 || state.longestRoad === us;
+  if (!nearRace && immediateLength < target) return noPlan;
+
+  const needsImmediateSecurity =
+    (state.longestRoad !== us && immediateLength >= target) ||
+    (state.longestRoad === us && opponentLength >= beforeLength && immediateLength > beforeLength);
+  const immediateSecurity = needsImmediateSecurity
+    ? roadSecurity(first, us, immediateLength)
+    : { blockers: 0, maxDrop: 0, worstLength: immediateLength };
+  const secureNow = immediateLength >= target && immediateSecurity.worstLength > opponentLength;
+  const claimNow = state.longestRoad !== us && immediateLength >= target;
+  const defendNow =
+    state.longestRoad === us &&
+    opponentLength >= beforeLength &&
+    immediateLength > beforeLength &&
+    immediateSecurity.worstLength > opponentLength;
+
+  const nodes: RoadPlanNode[] = [{ state: first, path: [action.edge] }];
+  let frontier = nodes.slice();
+  for (let depth = 0; depth < 2; depth++) {
+    const next: RoadPlanNode[] = [];
+    for (const node of frontier) next.push(...roadPlanExtensions(node, us));
+    if (!next.length) break;
+    nodes.push(...next);
+    // Keep the bounded search cheap while preserving the best topological
+    // branches from each depth. The first edge remains the authoritative
+    // action; this only estimates whether the race is real.
+    frontier = next
+      .sort((a, b) => roadLength(b.state, us) - roadLength(a.state, us) || b.path.length - a.path.length)
+      .slice(0, 10);
+  }
+
+  let bestLength = immediateLength;
+  let goalPath: string[] | null = immediateLength >= target ? [action.edge] : null;
+  let goalSecurity = immediateSecurity;
+  let goalLength = immediateLength;
+  for (const node of nodes) {
+    const length = roadLength(node.state, us);
+    if (length > bestLength) bestLength = length;
+    if (length < target) continue;
+    const security = node.path.length === 1 ? immediateSecurity : roadSecurity(node.state, us, length);
+    const betterGoal =
+      !goalPath ||
+      node.path.length < goalPath.length ||
+      (node.path.length === goalPath.length && length > goalLength) ||
+      (node.path.length === goalPath.length && length === goalLength && security.worstLength > goalSecurity.worstLength);
+    if (betterGoal) {
+      goalPath = node.path;
+      goalLength = length;
+      goalSecurity = security;
+    }
+  }
+  const claimSoon = goalPath !== null;
+  const secureSoon = claimSoon && goalSecurity.worstLength > opponentLength;
+  const roadsToGoal = goalPath ? goalPath.length : null;
+
+  let value = 0;
+  if (claimNow) {
+    // The award is a real two-VP swing, but only the secure version deserves
+    // to beat an immediately available house/city.
+    value += secureNow ? 78 : 20;
+    if (totalVP(state, us) + 2 >= state.config.victoryPoints) value += secureNow ? 70 : 12;
+  } else if (state.longestRoad !== us && claimSoon) {
+    // A future race is useful context, not permission to tunnel on roads.
+    // It gets a modest bonus and is later gated against direct builds.
+    value += secureSoon ? 26 : 8;
+    if (roadsToGoal === 2) value += 8;
+  } else if (defendNow) {
+    value += 46;
+  } else if (state.longestRoad === us && opponentLength < beforeLength) {
+    // Once the award is safe, additional roads are usually inferior to a
+    // settlement/city unless they are a necessary denial move.
+    value -= 22;
+  }
+  return {
+    immediateLength,
+    bestLength,
+    opponentLength,
+    roadsToGoal,
+    claimNow,
+    secureNow,
+    claimSoon,
+    secureSoon,
+    defendNow,
+    value,
+  };
+}
+
+function roadBuildingValue(state: GameState, us: string): number {
+  const sim = cloneState(state);
+  sim.current = us;
+  sim.phase = "road_building";
+  sim.pendingRoads = 2;
+  const first = legalActions(sim).filter((action) => action.type === "BUILD_ROAD");
+  if (!first.length) return -18;
+  const rankedFirst = first
+    .map((action) => ({ action, score: roadExpansionScore(sim, action) }))
+    .sort((a, b) => b.score - a.score);
+  const bestFirst = rankedFirst[0];
+  applyAction(sim, bestFirst.action, () => 0.5);
+  const second = legalActions(sim)
+    .filter((action) => action.type === "BUILD_ROAD")
+    .map((action) => roadExpansionScore(sim, action))
+    .sort((a, b) => b - a)[0] ?? 0;
+  const house = bestReachableSettlementValue(sim, us);
+  const award = longestRoadPlanScore(state, bestFirst.action);
+  return bestFirst.score + second * 0.72 + (house > 0 ? house * 0.34 : -8) + award.value * 0.65;
+}
+
+function yearOfPlentyValue(state: GameState, us: string): number {
+  const me = player(state, us);
+  let best = 0;
+  for (const a of RESOURCES) {
+    if (state.bank[a] <= 0) continue;
+    for (const b of RESOURCES) {
+      if (state.bank[b] - (a === b ? 1 : 0) <= 0) continue;
+      const after = { ...me.hand, [a]: me.hand[a] + 1, [b]: me.hand[b] + 1 };
+      const unlock = unlockLabel(me.hand, after);
+      const unlockScore = unlock === "city" ? 58 : unlock === "settlement" ? 48 : unlock === "dev card" ? 28 : unlock === "road" ? 18 : 0;
+      const quality = (a === "wheat" || a === "ore" ? 7 : 3) + (b === "wheat" || b === "ore" ? 7 : 3);
+      best = Math.max(best, unlockScore + quality);
+    }
+  }
+  return 14 + best;
+}
+
+function placeForEstimate(state: GameState, id: string, vertex: string): void {
+  const p = player(state, id);
+  if (!p.settlements.includes(vertex) && !p.cities.includes(vertex)) p.settlements.push(vertex);
+}
+
+function opponentDenial(state: GameState, us: string, vertex: string): number {
+  const after = cloneState(state);
+  placeForEstimate(after, us, vertex);
+  return state.players
+    .filter((p) => p.id !== us)
+    .reduce((denial, opponent) => {
+      const before = bestOpenSettlementValue(state, opponent.id);
+      const afterValue = bestOpenSettlementValue(after, opponent.id);
+      return denial + Math.max(0, before - afterValue);
+    }, 0);
+}
+
+/**
+ * The reverse-order setup settlement is not a second copy of the opening
+ * pick.  It is the hand that has to carry the first two builds: a corner
+ * with excellent pips but no sheep (or no expansion resource) often leaves
+ * the player unable to convert those pips into a settlement, city, or dev.
+ * Score the pair's combined coverage and its actual starting cards before
+ * allowing raw production to break the tie.
+ */
+export function setupSecondSettlementScore(state: GameState, id: string, vertex: string): number {
+  const me = player(state, id);
+  if (me.settlements.length === 0) return 0;
+  const before = production(state, id);
+  const sim = cloneState(state);
+  placeForEstimate(sim, id, vertex);
+  const after = production(sim, id);
+  const owned = new Set<string>([...me.settlements, vertex]);
+  const starting: Record<Resource, number> = { wood: 0, brick: 0, sheep: 0, wheat: 0, ore: 0 };
+  const covered = new Set<Resource>();
+  for (const ownedVertex of owned) {
+    for (const hid of sim.board.vertices[ownedVertex]?.hexes ?? []) {
+      const hex = sim.board.hexes[hid];
+      const resource = resourceOf(hex);
+      if (!resource) continue;
+      covered.add(resource);
+      starting[resource] += 1;
+    }
+  }
+
+  // Keep the reverse-order pick tied to real production.  Coverage is the
+  // constraint, not a substitute for pips: an all-resource corner that never
+  // rolls is not a useful complement to the opening settlement.
+  let score = settlementSpotValue(state, id, vertex) * 0.55;
+  const expansion = ["wood", "brick", "sheep", "wheat"] as const;
+  for (const resource of expansion) {
+    if (before[resource] <= 0 && after[resource] > 0) score += 24;
+    // A pair with no brick/wood/sheep is not merely a little less balanced:
+    // it cannot make the next settlement without repeated trades. Treat a
+    // missing expansion resource as a strategic veto unless the map makes it
+    // genuinely unavoidable. Wheat is still important, but can be converted
+    // through a port/city line, so its penalty is slightly softer.
+    if (after[resource] <= 0) {
+      if (resource === "wheat") {
+        // Wheat is the conversion hinge for cities, devs, and most third
+        // settlements. A wheatless second settlement is only acceptable when
+        // the remaining board genuinely offers no wheat corner.
+        const wheatOptionExists = settlementSpots(sim, me, true).some(
+          (spot) => localPips(sim, spot, "wheat") > 0,
+        );
+        score -= wheatOptionExists ? 108 : 35;
+      } else {
+        // Sheep is the most common missing hinge in an otherwise attractive
+        // wheat/wood/brick/ore pair: without it, the third settlement and
+        // development-card routes depend on repeated player trades. Keep the
+        // diversity veto close to the wheat veto so raw pips cannot hide that
+        // tempo loss in 4-player openings.
+        score -= resource === "sheep" ? 94 : 70;
+      }
+    }
+    if (starting[resource] > 0) score += 3;
+  }
+  // Ore is a strong city/dev resource, but missing it is less damaging when
+  // the first settlement already has wheat/ore production.  In a four-player
+  // opening, however, a wheat-heavy first pick plus a no-ore second pick can
+  // strand the player in a low-VP trade loop, so price a viable ore corner
+  // when one remains.
+  if (before.ore <= 0 && after.ore > 0) score += 18;
+  if (after.ore <= 0) {
+    const oreOptionExists = settlementSpots(sim, me, true).some(
+      (spot) => localPips(sim, spot, "ore") > 0,
+    );
+    const alignedOrePort = sim.board.vertices[vertex]?.port?.ratio === 2 &&
+      sim.board.vertices[vertex]?.port?.resource === "ore" &&
+      localPips(sim, vertex, "ore") > 0;
+    score -= alignedOrePort ? 24 : oreOptionExists ? 62 : 30;
+  }
+  score += covered.size * 5;
+
+  // Reward a pair that can plausibly convert its first roll sequence into a
+  // build. These are deliberately smaller than the core coverage terms so a
+  // 6/8 remains valuable, but a duplicated wheat corner cannot erase a
+  // missing settlement resource.
+  score += Math.min(8, starting.wood) * 2;
+  score += Math.min(8, starting.brick) * 2;
+  score += Math.min(8, starting.sheep) * 2;
+  score += Math.min(8, starting.wheat) * 1.5;
+  score += Math.min(8, starting.ore) * 1.25;
+  score += (after.wood + after.brick + after.sheep) * 0.35;
+  score += (after.wheat + after.ore) * 0.24;
+
+  const port = sim.board.vertices[vertex]?.port;
+  if (port) {
+    if (port.ratio === 2 && port.resource && after[port.resource] >= 4) score += 20;
+    else if (port.ratio === 3) score += 4;
+  }
+  return score;
+}
+
+function likelyComplementValue(state: GameState, action: Action): number {
+  if (state.phase !== "setup_settle" || !action.vertex) return 0;
+  const me = player(state, action.player);
+  if (me.settlements.length > 0) return 0;
+
+  const sim = cloneState(state);
+  const opening = legalActions(sim).find(
+    (candidate) => candidate.type === "PLACE_SETTLEMENT" && candidate.player === action.player && candidate.vertex === action.vertex,
+  );
+  if (!opening) {
+    placeForEstimate(sim, action.player, action.vertex);
+  } else {
+    applyAction(sim, opening, () => 0.5);
+  }
+
+  let guard = 0;
+  while (sim.phase !== "ended" && guard++ < 24) {
+    if (sim.phase === "setup_road") {
+      const road = legalActions(sim).find((candidate) => candidate.type === "PLACE_ROAD");
+      if (!road) break;
+      applyAction(sim, road, () => 0.5);
+      continue;
+    }
+    if (sim.phase !== "setup_settle") break;
+    if (sim.current === action.player && player(sim, action.player).settlements.length >= 1) {
+      return Math.max(
+        0,
+        ...legalActions(sim)
+          .filter((candidate) => candidate.type === "PLACE_SETTLEMENT" && candidate.vertex)
+          .map((candidate) => setupSecondSettlementScore(sim, action.player, candidate.vertex!) +
+            settlementSpotValue(sim, action.player, candidate.vertex!) * 0.35),
+      );
+    }
+    const opponentPick = legalActions(sim)
+      .filter((candidate) => candidate.type === "PLACE_SETTLEMENT" && candidate.vertex)
+      .sort((a, b) => settlementSpotValue(sim, sim.current, b.vertex!) - settlementSpotValue(sim, sim.current, a.vertex!))[0];
+    if (!opponentPick) break;
+    applyAction(sim, opponentPick, () => 0.5);
+  }
+  return 0;
+}
+
+export function settlementPairScore(state: GameState, action: Action): number {
+  if (state.phase !== "setup_settle" || !action.vertex) return 0;
+  const current = settlementSpotValue(state, action.player, action.vertex);
+  const complement = likelyComplementValue(state, action);
+  const denial = opponentDenial(state, action.player, action.vertex);
+  return current + complement * 0.9 + denial * 2.2;
+}
+
+export const setupSettlementPairScore = settlementPairScore;
+
+export function forcedWin(state: GameState): Action | null {
+  const acts = legalActions(state);
+  for (const a of acts) {
+    if (a.type === "BUILD_CITY" || a.type === "BUILD_SETTLEMENT") {
+      const p = player(state, a.player);
+      const gain = a.type === "BUILD_CITY" ? 2 : 1;
+      if (totalVP(state, p.id) + gain >= state.config.victoryPoints) return a;
+    }
+    if (a.type === "BUILD_ROAD" && state.longestRoad !== a.player) {
+      if (totalVP(state, a.player) + 2 >= state.config.victoryPoints) {
+        const len = roadLength(state, a.player);
+        const held = state.longestRoad ? roadLength(state, state.longestRoad) : 4;
+        if (len + 1 > held && len + 1 >= 5) return a;
+      }
+    }
+  }
+  return null;
+}
+
+function oneTurnVpCeiling(state: GameState, id: string): number {
+  const p = player(state, id);
+  let ceiling = totalVP(state, id);
+  if (p.settlements.length > 0 && canPay(p.hand, COSTS.city)) ceiling = Math.max(ceiling, totalVP(state, id) + 2);
+  if (
+    p.settlements.length < 5 &&
+    p.settlements.length + p.cities.length < 9 &&
+    canPay(p.hand, COSTS.settlement) &&
+    settlementSpots(state, p, false).length > 0
+  ) {
+    ceiling = Math.max(ceiling, totalVP(state, id) + 1);
+  }
+  if (p.devs.knight > 0 && p.knightsPlayed === 2) ceiling = Math.max(ceiling, totalVP(state, id) + 2);
+
+  if (canPay(p.hand, COSTS.road) && state.longestRoad !== id) {
+    const held = state.longestRoad ? roadLength(state, state.longestRoad) : 4;
+    const canTakeRoad = roadSpots(state, p).some((edge) => {
+      const next = cloneState(state);
+      const nextP = player(next, id);
+      nextP.roads.push(edge);
+      return roadLength(next, id) >= 5 && roadLength(next, id) > held;
+    });
+    if (canTakeRoad) ceiling = Math.max(ceiling, totalVP(state, id) + 2);
+  }
+  return ceiling;
+}
+
+function defensiveThreatDelta(state: GameState, action: Action): number {
+  const us = action.player;
+  const target = state.config.victoryPoints;
+  const opponents = state.players.filter((p) => p.id !== us);
+  const before = Math.max(0, ...opponents.map((p) => oneTurnVpCeiling(state, p.id)));
+  // Do not spend extra graph/simulation time until an opponent is close
+  // enough that denying their next build can change the winner.
+  if (before < target - 3) return 0;
+  if (![
+    "BUILD_SETTLEMENT",
+    "BUILD_CITY",
+    "BUILD_ROAD",
+    "MOVE_ROBBER",
+    "ACCEPT_TRADE",
+    "MARITIME_TRADE",
+  ].includes(action.type)) return 0;
+  try {
+    const after = cloneState(state);
+    applyAction(after, action, () => 0.5);
+    const afterCeiling = Math.max(0, ...after.players
+      .filter((p) => p.id !== us)
+      .map((p) => oneTurnVpCeiling(after, p.id)));
+    const reduced = before - afterCeiling;
+    if (reduced <= 0) return 0;
+    const winBlock = afterCeiling < target && before >= target ? 70 : 0;
+    const nearBlock = afterCeiling < target - 1 && before >= target - 1 ? 35 : 0;
+    return reduced * 28 + winBlock + nearBlock;
+  } catch {
+    return 0;
+  }
+}
+
+export function heuristicScore(state: GameState, action: Action): number {
+  const us = action.player;
+  const me = player(state, us);
+  let s = 0;
+  const myProd = production(state, us);
+  const opp = state.players.filter((p) => p.id !== us);
+  const oppVp = Math.max(0, ...opp.map((p) => totalVP(state, p.id)));
+  const myVp = totalVP(state, us);
+  const endgame = myVp >= state.config.victoryPoints - 4 || oppVp >= state.config.victoryPoints - 4;
+
+  // Add a direct win-sequence defense layer before operation-specific
+  // heuristics.  A good self-build is still secondary when a settlement,
+  // road cut, or other legal action removes an opponent's immediate VP path.
+  s += defensiveThreatDelta(state, action);
+
+  switch (action.type) {
+    case "PLACE_SETTLEMENT":
+    case "BUILD_SETTLEMENT": {
+      s += 40;
+      if (action.vertex) {
+        if (state.phase === "setup_settle" && action.type === "PLACE_SETTLEMENT") {
+          // The opening pick is a package: value the likely reverse-order
+          // complement and the high-value spot this pick removes from rivals.
+          s += me.settlements.length === 0
+            ? settlementPairScore(state, action)
+            : setupSecondSettlementScore(state, us, action.vertex);
+        } else {
+          s += settlementSpotValue(state, us, action.vertex);
+          const v = state.board.vertices[action.vertex];
+          for (const o of opp) {
+            const shares = v.hexes.some((hx) =>
+              state.board.hexes[hx].vertices.some((vid) => o.settlements.includes(vid) || o.cities.includes(vid)),
+            );
+            if (shares) s += 6;
+          }
+        }
+        const v = state.board.vertices[action.vertex];
+        // settlementSpotValue already prices a port against the production it
+        // can actually convert; keep only a small execution tie-break here.
+        if (v.port) s += v.port.ratio === 2 ? 2 : 1;
+      }
+      if (me.settlements.length + me.cities.length === 2) s += 10;
+      if (me.settlements.length + me.cities.length === 2) s += 8;
+      else if (me.settlements.length + me.cities.length === 3) s += 4;
+      break;
+    }
+    case "PLACE_ROAD":
+    case "BUILD_ROAD": {
+      s += action.type === "PLACE_ROAD" ? 10 : 8;
+      const roadValue = roadExpansionScore(state, action);
+      s += roadValue;
+      const lrPlan = longestRoadPlanScore(state, action);
+      s += lrPlan.value;
+      if (action.type === "BUILD_ROAD" && state.longestRoad === us && !lrPlan.defendNow) {
+        // A holder with a safe margin should convert the hand into VP,
+        // production, or dev-card tempo instead of spending another road on
+        // a vanity extension. Only an actual rival-length threat can reopen
+        // this branch.
+        s -= 28;
+      }
+      if (action.type === "BUILD_ROAD") {
+        const secureAwardSwing = (lrPlan.claimNow && lrPlan.secureNow) || lrPlan.defendNow;
+        const canBuyDev = state.deck.length > 0 && canPay(me.hand, COSTS.dev);
+        // Roads are an investment, not a default resource sink. Once the
+        // player has a network of four or more, make the policy prove that
+        // the next edge creates a real settlement route or a defensible LR
+        // swing. This is the opportunity-cost layer that stops attractive
+        // frontier geometry from consuming the wheat/sheep/ore needed for
+        // cities and development cards.
+        if (!secureAwardSwing) {
+          if (me.roads.length >= 4) s -= 32;
+          if (me.roads.length >= 6) s -= 45;
+          if (me.roads.length >= 8) s -= 55;
+          if (canBuyDev) s -= 22;
+          if (!lrPlan.claimSoon) s -= 28;
+          if (!lrPlan.claimSoon && roadValue < 52) s -= 18;
+          // Preserve a near-complete conversion hand. The missing card may
+          // arrive from the next roll or a one-card trade; spending wood and
+          // brick on a road here throws away a city/settlement tempo.
+          const cityMissing = costDistance(me.hand, COSTS.city);
+          const settlementMissing = costDistance(me.hand, COSTS.settlement);
+          if (cityMissing <= 1) s -= 34;
+          if (settlementMissing <= 1) s -= 30;
+        }
+        const canBuildSettlement =
+          me.settlements.length + me.cities.length < 9 &&
+          me.settlements.length < 5 &&
+          canPay(me.hand, COSTS.settlement) &&
+          settlementSpots(state, me, false).length > 0;
+        if (canBuildSettlement) {
+          // A house is the direct VP/production action.  Yield to it unless
+          // this road is an immediate, secure Longest Road award/defense.
+          const bestHouse = bestReachableSettlementValue(state, us);
+          s -= 34;
+          if (!secureAwardSwing) {
+            s -= 24;
+            if (roadValue < bestHouse + 24) s -= 18;
+          }
+        }
+        const canBuildCity = me.cities.length < 4 && me.settlements.length > 0 && canPay(me.hand, COSTS.city);
+        if (canBuildCity) s -= 22;
+      }
+      for (const rival of opp) {
+        if (!roadSpots(state, rival).includes(action.edge!)) continue;
+        const rivalLen = roadLength(state, rival.id);
+        // A cut is much more valuable when the rival is one road from the
+        // award or one award away from winning. This is the table-level
+        // denial that raw road length misses.
+        if (rivalLen >= 4) s += 14;
+        if (totalVP(state, rival.id) + (state.longestRoad === rival.id ? 0 : 2) >= state.config.victoryPoints - 1) s += 22;
+      }
+      if (endgame) s += 10;
+      break;
+    }
+    case "BUILD_CITY": {
+      s += 55;
+      if (action.vertex) {
+        const v = state.board.vertices[action.vertex];
+        for (const hid of v.hexes) {
+          const h = state.board.hexes[hid];
+          const res = resourceOf(h);
+          const pips = h.number ? PIP[h.number] : 0;
+          s += pips * 4;
+          if (res === "wheat" || res === "ore") s += pips * 3;
+        }
+      }
+      break;
+    }
+    case "BUY_DEV":
+      s += 18;
+      if (myProd.ore + myProd.wheat + myProd.sheep >= 10) s += 8;
+      if (me.knightsPlayed >= 2) s += 12;
+      if (me.devs.knight + me.devs.monopoly + me.devs.year_of_plenty + me.devs.road_building === 0) s += 6;
+      // Devs are the right conversion when expansion is currently blocked,
+      // but should not outrank an immediately payable house/city just because
+      // the hand happens to contain sheep-wheat-ore.
+      if (settlementSpots(state, me, false).length === 0) s += 8;
+      if (endgame) s += 10;
+      break;
+    case "PLAY_KNIGHT": {
+      s += 12;
+      const strongestOpponent = opp
+        .slice()
+        .sort((a, b) => totalVP(state, b.id) - totalVP(state, a.id))[0];
+      if (me.knightsPlayed === 2) s += 24;
+      if (strongestOpponent && totalVP(state, strongestOpponent.id) >= state.config.victoryPoints - 3) s += 18;
+      if (strongestOpponent) {
+        const targetPressure = Math.max(...RESOURCES.map((r) => resourcePressure(state, strongestOpponent.id, r)));
+        s += targetPressure * 4;
+      }
+      const robberValue = bestRobberValueAfterKnight(state, us);
+      s += Math.max(0, robberValue - 20) * 0.22;
+      if (robberValue < 20 && me.knightsPlayed < 2) s -= 16;
+      if (!strongestOpponent && me.knightsPlayed === 0) s -= 8;
+      break;
+    }
+    case "MOVE_ROBBER": {
+      s += 15;
+      if (action.hex) {
+        const h = state.board.hexes[action.hex];
+        const pips = h.number ? PIP[h.number] : 0;
+        const res = resourceOf(h);
+        let theirs = 0;
+        let ours = 0;
+        for (const vid of h.vertices) {
+          for (const pl of state.players) {
+            const n = pl.cities.includes(vid) ? 2 : pl.settlements.includes(vid) ? 1 : 0;
+            if (!n) continue;
+            if (pl.id === us) ours += n * pips;
+            else {
+              const pressure = res ? resourcePressure(state, pl.id, res) : 0;
+              theirs += n * pips * (res === "wheat" || res === "ore" ? 1.4 : 1) * (1 + pressure * 0.42);
+              if (pressure >= 1.5) s += n * 4;
+            }
+          }
+        }
+        s += theirs * 4 - ours * 5;
+      }
+      if (action.stealFrom) s += 6;
+      break;
+    }
+    case "PLAY_MONOPOLY":
+      s += 20;
+      if (action.resource) {
+        const held = opp.reduce((n, o) => n + o.hand[action.resource as Resource], 0);
+        s += held * 8;
+      }
+      break;
+    case "PLAY_ROAD_BUILDING":
+      s += roadBuildingValue(state, us);
+      if (endgame) s += 12;
+      break;
+    case "PLAY_YEAR_OF_PLENTY": {
+      if (action.resources?.length || action.resource) {
+        s += 14;
+        for (const r of action.resources ?? (action.resource ? [action.resource] : [])) {
+          if (r === "wheat" || r === "ore") s += 8;
+          else if (r === "brick" || r === "wood") s += 4;
+        }
+      } else {
+        s += yearOfPlentyValue(state, us);
+      }
+      break;
+    }
+    case "ACCEPT_TRADE": {
+      const o = state.pendingOffer;
+      s += 10;
+      if (o) {
+        const after = afterSwap(me.hand, o.get, o.getCount, o.give, o.giveCount);
+        const unlock = unlockLabel(me.hand, after);
+        s += strategicTradeValue(state, us, me.hand, after, o.give);
+        if (unlock === "city") s += 48;
+        else if (unlock === "settlement") s += 36;
+        else if (unlock === "dev card") s += 24;
+        else if (unlock === "road") s += 16;
+        if (o.give === "wheat" || o.give === "ore") s += 8;
+        if ((o.get === "wheat" || o.get === "ore") && !unlock && strategicTradeValue(state, us, me.hand, after, o.give) < 8) s -= 12;
+        const senderUnlock = opponentTradeUnlock(state, o);
+        if (senderUnlock === "city") s -= 36;
+        else if (senderUnlock === "settlement") s -= 28;
+        else if (senderUnlock === "dev card") s -= 18;
+        else if (senderUnlock === "road") s -= 12;
+        if (senderUnlock && totalVP(state, o.from) >= state.config.victoryPoints - 3) s -= 14;
+        if (after[o.get] < 0) s -= 40;
+      }
+      break;
+    }
+    case "REJECT_TRADE":
+      s += 7;
+      if (state.pendingOffer && (state.pendingOffer.get === "wheat" || state.pendingOffer.get === "ore")) s += 10;
+      break;
+    case "MARITIME_TRADE": {
+      s += 4;
+      const give = action.give;
+      const get = action.get;
+      const n = action.giveCount ?? 4;
+      if (give && get) {
+        const after = afterSwap(me.hand, give, n, get, 1);
+        const unlock = unlockLabel(me.hand, after);
+        if (unlock === "city") s += 44;
+        else if (unlock === "settlement") s += 34;
+        else if (unlock === "dev card") s += 22;
+        else if (unlock === "road") s += 14;
+
+        // A trade is often the preparatory move for a settlement already
+        // reachable from the existing road network. Value that one-turn
+        // route explicitly so the bot does not spend the same tempo extending
+        // roads toward a less-secure future house.
+        const reachableHouse = bestReachableSettlementValue(state, us);
+        if (reachableHouse > 0) {
+          const beforeMissing = RESOURCES.reduce(
+            (sum, resource) => sum + Math.max(0, COSTS.settlement[resource] - me.hand[resource]),
+            0,
+          );
+          const afterMissing = RESOURCES.reduce(
+            (sum, resource) => sum + Math.max(0, COSTS.settlement[resource] - after[resource]),
+            0,
+          );
+          const progress = beforeMissing - afterMissing;
+          s += reachableHouse * 0.22;
+          if (canPay(after, COSTS.settlement)) s += 62 + reachableHouse * 0.3;
+          else if (progress > 0) s += progress * 12 + reachableHouse * 0.08;
+        }
+        if (get === "wheat" || get === "ore") s += 6;
+        if (get === "brick" || get === "wood") s += 3;
+      }
+      break;
+    }
+    case "ROLL":
+      s += 5;
+      if (handSize(me) > state.config.discardLimit && !me.devs.knight) s += 20;
+      break;
+    case "END_TURN":
+      s -= 2;
+      if (handSize(me) > state.config.discardLimit) s -= 15;
+      break;
+    case "DISCARD": {
+      const d = action.discard ?? {};
+      s += 5;
+      for (const r of RESOURCES) {
+        const n = d[r] ?? 0;
+        if (r === "wheat" || r === "ore") s -= n * 3;
+        else s -= n;
+      }
+      break;
+    }
+    default:
+      s += 1;
+  }
+  s += profileBias(state, action);
+  if (visibleVP(state, us) >= 11) s += action.type.startsWith("BUILD") ? 8 : 0;
+  return s;
+}
+
+export const OPERATION_RULES = `Pick the legal operation that most increases P(we reach the VP target before any opponent).
+Colonist ranked 1v1 is 15 VP, discard 9, friendly robber; 4p is 10 VP, discard 7.
+Never pick a move just because it is conventional. Prefer tempo, denial, and win-sequence over raw pips.
+Forced wins and opponent-win interruptions beat every other consideration.
+Opening setup: prefer a two-settlement pair with wheat and at least two expansion resources; do not choose a high-pip wheatless pair when a viable wheat corner exists.
+Endgame: when our win route needs two VP or fewer, take a legal city/settlement before a slower road, dev purchase, trade, or end turn unless the latter directly blocks an opponent's immediate win.`;
+
+export const TARGET_RULES = `Pick the target that matches the chosen operation.
+Prefer scarce wheat/ore, blocking the opponent's next build, ports that convert excess, and road cuts that steal Longest Road.
+Robber: attack the resource they need next, not their historically strongest tile.`;

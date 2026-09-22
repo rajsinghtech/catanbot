@@ -1,0 +1,22 @@
+{
+  "name": "catanbot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Colonist ranked Catan advisor: Jev decides among engine-legal actions.",
+  "scripts": {
+    "start": "node --experimental-strip-types src/cli.ts",
+    "demo": "node --experimental-strip-types src/cli.ts demo",
+    "attach": "node --experimental-strip-types src/cli.ts attach",
+    "status": "node --experimental-strip-types src/cli.ts status",
+    "play": "node --experimental-strip-types src/play/drive.ts",
+    "eval:catanatron": "python3 tools/catanatron_eval.py",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.2"
+  }
+}

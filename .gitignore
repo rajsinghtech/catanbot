@@ -1,0 +1,11 @@
+node_modules
+.catanatron-venv
+.env
+.env.local
+.run
+dist
+*.log
+.DS_Store
+playwright-report
+test-results
+__pycache__/

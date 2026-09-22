@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catanbot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600;700&family=Instrument+Serif:ital@0;1&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/hud.css" />
+  </head>
+  <body>
+    <div class="felt">
+      <header class="mast">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <p class="title">Catanbot</p>
+          <p class="sub" id="meta">waiting for a position</p>
+        </div>
+        <div class="mast-status">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="connection">offline</span>
+          <span class="clock" id="latency">—</span>
+        </div>
+      </header>
+
+      <section class="control-panel" aria-labelledby="control-title">
+        <div class="panel-title">
+          <div>
+            <p class="kicker">Control</p>
+            <h1 id="control-title">Choose what Catanbot is allowed to do</h1>
+          </div>
+          <span class="mode-chip" id="modeChip">recommendation-only</span>
+        </div>
+        <div class="control-grid">
+          <div class="mode-buttons" role="group" aria-label="Automation mode">
+            <button type="button" id="modeRecommend" class="mode-button">Recommend only <small>any match</small></button>
+            <button type="button" id="modeBots" class="mode-button accent">Auto-play bot match <small>clicks actions</small></button>
+            <button type="button" id="modeOff" class="mode-button danger">Turn auto off <small>hard stop</small></button>
+          </div>
+          <div class="control-copy">
+            <p id="modeHelp">Recommendations stay visible, but no action is sent.</p>
+            <p class="fine">Auto-play is gated to non-ranked bot matches. A manual OFF persists across the driver’s next game reset.</p>
+          </div>
+        </div>
+        <div class="control-status">
+          <span><b>Control owner</b> <span id="controlOwner">startup</span></span>
+          <span><b>Attached match</b> <span id="matchKind">waiting</span></span>
+          <span><b>Live menu</b> <span id="liveMenu">not observed</span></span>
+          <span><b>Current legal moves</b> <span id="legalSummary">—</span></span>
+        </div>
+      </section>
+
+      <main class="sheet">
+        <p class="who-turn" id="whoTurn"></p>
+        <p class="call" id="action">Connecting to the bot…</p>
+        <p class="target" id="target"></p>
+        <p class="reason" id="reason"></p>
+
+        <div class="board-wrap">
+          <svg id="board" viewBox="-5 -5 10 10" role="img" aria-label="Catan board"></svg>
+          <p class="board-cap" id="boardCap"></p>
+        </div>
+
+        <section class="split">
+          <div>
+            <p class="kicker">Next</p>
+            <p id="plan"></p>
+          </div>
+          <div>
+            <p class="kicker">Threat</p>
+            <p id="threat"></p>
+          </div>
+        </section>
+
+        <div class="meter">
+          <span id="source">mock</span>
+          <span id="confidence">0</span>
+          <span id="facts"></span>
+        </div>
+      </main>
+
+      <aside class="rail">
+        <div id="rail"></div>
+        <section class="meta-card configuration-card">
+          <p class="kicker">Configuration</p>
+          <p id="configSummary">Attach a Colonist tab to configure live play.</p>
+          <p class="fine">The extension HUD is hidden by default. Use <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> or the extension popup to show it.</p>
+        </section>
+        <section class="meta-card menu-card">
+          <p class="kicker">Supported Colonist menus</p>
+          <div id="menuList" class="menu-list"></div>
+        </section>
+        <section class="meta-card">
+          <p class="kicker">Hexes</p>
+          <div id="hexlist" class="hexlist"></div>
+        </section>
+        <section class="meta-card">
+          <p class="kicker">Log</p>
+          <ol id="log" class="log"></ol>
+        </section>
+      </aside>
+
+      <footer class="bar">
+        <button type="button" id="demo">Run demo</button>
+        <button type="button" id="step">One ply</button>
+        <label>
+          Seats
+          <select id="seats">
+            <option>2</option>
+            <option>3</option>
+            <option>4</option>
+            <option>5</option>
+            <option>6</option>
+          </select>
+        </label>
+        <button type="button" id="reset">New board</button>
+        <button type="button" id="refresh">Refresh live state</button>
+      </footer>
+    </div>
+    <script src="/hud.js"></script>
+  </body>
+</html>
