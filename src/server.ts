@@ -773,6 +773,26 @@ export async function refreshRec(force = false): Promise<Recommendation> {
           target,
         }));
       }
+      if (process.env.CATANBOT_DEBUG_TRADE === "1" &&
+        (nextRec.action.type === "ACCEPT_TRADE" || nextRec.action.type === "REJECT_TRADE") &&
+        game.pendingOffer) {
+        const sender = game.players.find((p) => p.id === game.pendingOffer?.from);
+        console.log("trade-choice", JSON.stringify({
+          action: nextRec.action.type,
+          offerId: game.pendingOffer.id,
+          from: sender?.name,
+          fromId: sender?.id,
+          fromVisibleVp: sender ? visibleVP(game, sender.id) : null,
+          fromTotalVp: sender ? totalVP(game, sender.id) : null,
+          fromSettlements: sender?.settlements.length,
+          fromCities: sender?.cities.length,
+          fromRoads: sender?.roads.length,
+          fromKnights: sender?.knightsPlayed,
+          offer: game.pendingOffer,
+          knownHand: sender?.hand,
+          unknownCards: sender?.hidden.unknown,
+        }));
+      }
       const afterFingerprint = decisionFingerprint();
       const afterContextFingerprint = decisionContextFingerprint();
       const contextStable = afterContextFingerprint === contextFingerprint;

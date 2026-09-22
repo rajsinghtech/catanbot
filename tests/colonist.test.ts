@@ -222,6 +222,31 @@ test("two-building funnel accepts a player brick offer that fixes the expansion 
   assert.ok(heuristicScore(state, accept) > heuristicScore(state, reject));
 });
 
+test("trade scoring keeps a hidden-hand near-win sender in the decision", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, names: ["You", "Leader", "Blue", "White"], us: "red" });
+  const me = state.players[0];
+  const sender = state.players[1];
+  const vertices = Object.keys(state.board.vertices);
+  sender.cities = vertices.slice(0, 4);
+  sender.hidden.unknown = 5;
+  me.hand.ore = 1;
+  state.pendingOffer = {
+    id: "offer-hidden-leader",
+    from: sender.id,
+    give: "wood",
+    giveCount: 1,
+    get: "ore",
+    getCount: 1,
+  };
+
+  const actions = legalActions(state);
+  const accept = actions.find((action) => action.type === "ACCEPT_TRADE");
+  const reject = actions.find((action) => action.type === "REJECT_TRADE");
+  assert.ok(accept);
+  assert.ok(reject);
+  assert.ok(heuristicScore(state, reject) > heuristicScore(state, accept));
+});
+
 test("friendly robber skips an ineligible victim", () => {
   const state = newGame({ playerCount: 2, friendlyRobber: true }, { seed: 8, names: ["Alice", "Bob"] });
   const alice = state.players[0];
@@ -292,6 +317,21 @@ test("a third knight that takes Largest Army is recognized as a forced win", () 
 
   const win = forcedWin(state);
   assert.equal(win?.type, "PLAY_KNIGHT");
+});
+
+test("a weak pre-roll knight waits for a better robber window", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 8, us: "red" });
+  const me = state.players[0];
+  me.devs.knight = 1;
+  state.phase = "roll";
+  state.current = me.id;
+  state.turn = 1;
+
+  const play = legalActions(state).find((action) => action.type === "PLAY_KNIGHT");
+  const roll = legalActions(state).find((action) => action.type === "ROLL");
+  assert.ok(play);
+  assert.ok(roll);
+  assert.ok(heuristicScore(state, roll) > heuristicScore(state, play));
 });
 
 test("a city is only a one-VP forced-win increment", () => {

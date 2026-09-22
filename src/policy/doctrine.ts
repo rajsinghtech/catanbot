@@ -125,6 +125,50 @@ function opponentTradeUnlock(state: GameState, offer: NonNullable<GameState["pen
   return unlockLabel(sender.hand, after);
 }
 
+/**
+ * A player offer is also a move for the other seat.  The sender is visible in
+ * the live offer projection, but their exact hand usually is not, so price the
+ * counterparty from both sources: known-card unlocks and the public board
+ * position/resource pressure that explains why they requested this card.
+ * This keeps an offer from a near-win city/road player from looking like a
+ * generic one-for-one swap.
+ */
+function opponentTradePositionPressure(state: GameState, offer: NonNullable<GameState["pendingOffer"]>): number {
+  const sender = player(state, offer.from);
+  let pressure = 0;
+  const threat = opponentThreatScore(state, sender.id);
+  if (threat > 0) pressure += threat * 0.2;
+  if (opponentIsDangerous(state, sender.id)) pressure += 14;
+
+  // The requested card is the best public clue to the sender's immediate
+  // route. A wheat/ore request from a player with settlements/cities is often
+  // a city hinge; wood/brick/sheep/wheat is usually an expansion hinge.
+  pressure += resourcePressure(state, sender.id, offer.get) * 8;
+  if ((offer.get === "wheat" || offer.get === "ore") && sender.settlements.length > 0) pressure += 8;
+  if ((offer.get === "wood" || offer.get === "brick" || offer.get === "sheep" || offer.get === "wheat") &&
+    sender.settlements.length < 5 && settlementSpots(state, sender, false).length > 0) {
+    pressure += 7;
+  }
+  if ((offer.get === "wood" || offer.get === "brick") && roadLength(state, sender.id) >= 3) pressure += 6;
+
+  // When the sender's resource cards are known, compare their actual one-turn
+  // ceiling after the swap. Hidden opponent cards remain covered by the
+  // public-pressure terms above rather than being guessed as zero.
+  if (sender.hand[offer.give] >= offer.giveCount) {
+    const afterState = cloneState(state);
+    const afterSender = player(afterState, sender.id);
+    afterSender.hand = afterSwap(sender.hand, offer.give, offer.giveCount, offer.get, offer.getCount);
+    const ceilingDelta = oneTurnVpCeiling(afterState, sender.id) - oneTurnVpCeiling(state, sender.id);
+    if (ceilingDelta > 0) pressure += ceilingDelta * 24;
+    const unlock = opponentTradeUnlock(state, offer);
+    if (unlock === "city") pressure += 26;
+    else if (unlock === "settlement") pressure += 22;
+    else if (unlock === "road") pressure += 12;
+    else if (unlock === "dev card") pressure += 8;
+  }
+  return pressure;
+}
+
 function costDistance(hand: Hand, cost: Hand): number {
   return RESOURCES.reduce((sum, resource) => sum + Math.max(0, cost[resource] - hand[resource]), 0);
 }
@@ -2187,8 +2231,9 @@ export function heuristicScore(state: GameState, action: Action): number {
       const strongestOpponent = opp
         .slice()
         .sort((a, b) => totalVP(state, b.id) - totalVP(state, a.id))[0];
+      const takesLargestArmy = knightWouldTakeLargestArmy(state, us);
       if (me.knightsPlayed === 2) s += 24;
-      if (knightWouldTakeLargestArmy(state, us)) {
+      if (takesLargestArmy) {
         s += 70;
         if (totalVP(state, us) + 2 >= state.config.victoryPoints) s += 100;
       }
@@ -2201,6 +2246,14 @@ export function heuristicScore(state: GameState, action: Action): number {
       s += Math.max(0, robberValue - 20) * 0.22;
       if (robberValue < 20 && me.knightsPlayed < 2) s -= 16;
       if (!strongestOpponent && me.knightsPlayed === 0) s -= 8;
+      // Before the dice, a weak robber move is usually worth less than the
+      // information and production from rolling first. Spend the knight now
+      // only for Largest Army, a dangerous opponent, or a genuinely valuable
+      // interruption; this is different from the post-roll choice where the
+      // board has already delivered its resource result.
+      const urgentKnight = takesLargestArmy || opponentNearWin || robberValue >= 36;
+      if (state.phase === "roll" && !urgentKnight) s -= 24;
+      if (state.phase === "turn" && !takesLargestArmy && robberValue < 20) s -= 8;
       break;
     }
     case "MOVE_ROBBER": {
@@ -2263,10 +2316,32 @@ export function heuristicScore(state: GameState, action: Action): number {
         s += productionThreat * (opponentNearWin ? 2.5 : 1.2);
         s += Math.min(20, opp.reduce((n, o) => n + o.hidden.unknown, 0) * (opponentNearWin ? 1.5 : 0.5));
         if (opponentNearWin) s += 45;
+
+        // Monopoly is strongest when its cards immediately become a VP build
+        // or deny a near-win. Estimate hidden cards conservatively from the
+        // known hand plus the public production/unknown-card pool; do not
+        // burn it pre-roll for a speculative one-card scoop.
+        const unknown = opp.reduce((n, o) => n + o.hidden.unknown, 0);
+        const estimatedGain = held + Math.min(4, Math.floor(productionThreat / 8)) + Math.min(3, Math.floor(unknown / 5));
+        const after = { ...me.hand, [action.resource]: me.hand[action.resource] + estimatedGain };
+        const directCity = me.settlements.length > 0 && canPay(after, COSTS.city);
+        const directSettlement = me.settlements.length < 5 &&
+          settlementSpots(state, me, false).length > 0 && canPay(after, COSTS.settlement);
+        if (directCity || directSettlement) s += 22;
+        if (estimatedGain < 3 && !opponentNearWin) s -= 24;
+        if (state.phase === "roll" && !directCity && !directSettlement && !opponentNearWin && estimatedGain < 4) s -= 20;
       }
       break;
     case "PLAY_ROAD_BUILDING":
-      s += roadBuildingValue(state, us);
+      {
+        const cardValue = roadBuildingValue(state, us);
+        s += cardValue;
+        // Free roads are a conversion card, not two lottery tickets. Before a
+        // roll, preserve it unless the pair already proves a house/award/cut;
+        // after a roll, the same proof can be acted on immediately.
+        if (state.phase === "roll" && cardValue < 36 && !opponentNearWin) s -= 20;
+        if (cardValue >= 80) s += 12;
+      }
       if (endgame) s += 12;
       break;
     case "PLAY_YEAR_OF_PLENTY": {
@@ -2274,6 +2349,19 @@ export function heuristicScore(state: GameState, action: Action): number {
         s += yearOfPlentyActionValue(state, action);
       } else {
         s += yearOfPlentyValue(state, us);
+      }
+      const resources = action.resources ?? (action.resource ? [action.resource] : []);
+      if (resources.length) {
+        const after = { ...me.hand };
+        for (const resource of resources.slice(0, 2)) after[resource] += 1;
+        const directCity = me.settlements.length > 0 && canPay(after, COSTS.city);
+        const directSettlement = me.settlements.length < 5 &&
+          settlementSpots(state, me, false).length > 0 && canPay(after, COSTS.settlement);
+        // YOP should normally convert into a concrete build. If it does not,
+        // rolling first is the higher-information timing unless an opponent
+        // is about to win or the card itself prevents a discard/lockout.
+        if (directCity || directSettlement) s += 16;
+        else if (state.phase === "roll" && !opponentNearWin) s -= 18;
       }
       break;
     }
@@ -2317,6 +2405,10 @@ export function heuristicScore(state: GameState, action: Action): number {
         if (o.give === "wheat" || o.give === "ore") s += 8;
         if ((o.get === "wheat" || o.get === "ore") && !unlock && strategicTradeValue(state, us, me.hand, after, o.give) < 8) s -= 12;
         const senderUnlock = opponentTradeUnlock(state, o);
+        // Accepting is not neutral: it gives the sender the exact resource
+        // requested from their public board/position. Keep the sender's
+        // identity in the calculation even when their hand is hidden.
+        s -= opponentTradePositionPressure(state, o);
         const ownExpansionTrade = funnel.active && settlementProgress > 0;
         if (senderUnlock === "city") s -= ownExpansionTrade ? 14 : 36;
         else if (senderUnlock === "settlement") s -= ownExpansionTrade ? 10 : 28;
@@ -2329,7 +2421,13 @@ export function heuristicScore(state: GameState, action: Action): number {
     }
     case "REJECT_TRADE":
       s += 7;
-      if (state.pendingOffer && (state.pendingOffer.get === "wheat" || state.pendingOffer.get === "ore")) s += 10;
+      if (state.pendingOffer) {
+        if (state.pendingOffer.get === "wheat" || state.pendingOffer.get === "ore") s += 10;
+        // The fast response path still uses the same strategic score: decline
+        // is more valuable when this particular sender is close to a visible
+        // city/settlement/award breakpoint.
+        s += opponentTradePositionPressure(state, state.pendingOffer) * 0.45;
+      }
       break;
     case "MARITIME_TRADE": {
       s += 4;

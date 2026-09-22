@@ -1059,13 +1059,17 @@ async function main() {
     // A renderer read can transiently return null while Chrome is busy. Give
     // the first packet a short propagation window, then resend once even if
     // the read stayed unavailable. The command is idempotent by offer id.
-    const propagationWindow = 260;
+    const propagationWindow = 180;
     const shouldRetry = Date.now() - pending.sentAt >= propagationWindow || pending.nullReads >= 3;
     if (!shouldRetry) {
       pending.nextCheckAt = Date.now() + 70;
       return;
     }
-    if (pending.attempts >= 2) {
+    // The sender call is already immediate, but Colonist can take several
+    // websocket/store frames to reflect the response. Keep the idempotent
+    // offer-key retry alive long enough to cover that normal propagation
+    // window instead of declaring a valid decline/accept lost after ~500ms.
+    if (pending.attempts >= 5) {
       tradeRetries.delete(id);
       console.log("trade-unconfirmed", pending.click.actionType, id);
       return;
