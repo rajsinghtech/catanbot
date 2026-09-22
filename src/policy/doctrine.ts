@@ -341,6 +341,7 @@ function bestRobberValueAfterKnight(state: GameState, us: string): number {
 function settlementSpotValue(state: GameState, id: string, vertex: string): number {
   const v = state.board.vertices[vertex];
   if (!v) return -Infinity;
+  const me = player(state, id);
   const prod = production(state, id);
   const seen = new Set<Resource>();
   let score = 0;
@@ -359,13 +360,30 @@ function settlementSpotValue(state: GameState, id: string, vertex: string): numb
   }
   score += diceCoverage(state, vertex);
   if (v.port) {
+    const ownedPorts = [...me.settlements, ...me.cities]
+      .map((ownedVertex) => state.board.vertices[ownedVertex]?.port)
+      .filter((port): port is NonNullable<typeof port> => Boolean(port));
     if (v.port.ratio === 2 && v.port.resource) {
-      const aligned = localPips(state, vertex, v.port.resource);
-      // A matching 2:1 port is a conversion engine only when this corner can
-      // actually feed it. A weak, unaligned port should not beat production.
-      score += aligned >= 4 ? 18 : aligned > 0 ? 10 : 3;
+      const resource = v.port.resource;
+      const aligned = localPips(state, vertex, resource);
+      const alreadyOwned = ownedPorts.some((port) => port.ratio === 2 && port.resource === resource);
+      const availableSource = prod[resource] + aligned;
+      // A specific harbor is valuable when it has a resource stream to sell,
+      // including production from settlements elsewhere. A second harbor for
+      // a ratio the player already owns adds little; a first one with strong
+      // source production can be a real economic destination even when this
+      // exact corner's local pips are modest.
+      const localValue = aligned >= 4 ? 18 : aligned > 0 ? 10 : 3;
+      const marketValue = availableSource > 0 ? 4 + Math.min(20, availableSource * 2.5) : 3;
+      score += alreadyOwned ? 1 : Math.max(localValue, marketValue);
     } else {
-      score += 6;
+      const alreadyOwned = ownedPorts.some((port) => port.ratio === 3);
+      const source = Math.max(...RESOURCES.map((resource) =>
+        prod[resource] + localPips(state, vertex, resource)));
+      // A generic harbor converts any surplus stream, so value it against the
+      // strongest resource the player can actually produce rather than using
+      // the same tiny bonus on rich and barren economies alike.
+      score += alreadyOwned ? 1 : Math.max(6, source > 0 ? 4 + Math.min(14, source * 1.8) : 2);
     }
   }
   return score;
@@ -577,11 +595,19 @@ function settlementResourcesSupported(state: GameState, id: string): boolean {
     .filter((port): port is NonNullable<typeof port> => Boolean(port));
   return missing.every((resource) => {
     if (prod[resource] > 0) return true;
-    if (ports.some((port) => port.ratio === 2 && port.resource === resource)) {
-      return RESOURCES.some((other) => other !== resource && me.hand[other] >= 4);
+    // A 2:1 port's pictured resource is the one we give to the bank; it can
+    // buy any *different* resource. Treat an owned port as support for this
+    // missing card when its source pair is held or its production can supply
+    // that pair before the future house conversion.
+    if (ports.some((port) =>
+      port.ratio === 2 && port.resource && port.resource !== resource &&
+      (me.hand[port.resource] >= 2 || prod[port.resource] > 0),
+    )) {
+      return true;
     }
     if (ports.some((port) => port.ratio === 3 && !port.resource)) {
-      return handSize(me) - me.hand[resource] >= 3;
+      return handSize(me) - me.hand[resource] >= 3 ||
+        RESOURCES.some((source) => source !== resource && prod[source] > 0);
     }
     return false;
   });
@@ -933,7 +959,6 @@ export function roadReservesExpansionLane(state: GameState, action: Action): boo
     const target = state.config.victoryPoints;
 
     if (
-      me.settlements.length === 0 ||
       me.settlements.length >= 5 ||
       buildingCount >= 9 ||
       me.roads.length >= 7 ||

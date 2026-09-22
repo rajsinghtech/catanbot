@@ -1049,6 +1049,62 @@ test("a supported uncontested lane stays reserved before the settlement is payab
   assert.ok(heuristicScore(state, road) > heuristicScore(state, legalActions(state).find((action) => action.type === "END_TURN")!));
 });
 
+test("a city can anchor an expansion road toward a useful port", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 1, us: "red" });
+  const me = state.players[0];
+  me.settlements = [];
+  me.cities = ["0,-1|0,-2|1,-2", "0,-2|0,-3|1,-3"];
+  me.roads = [
+    "0,-1|0,-2|1,-2|0,-2|1,-2|1,-3",
+    "0,-2|0,-3|1,-3|0,-2|1,-2|1,-3",
+  ];
+  // The owned wood harbor can trade two wood for the missing ore. The open
+  // generic-harbor corner ahead produces wheat, so settling there adds both
+  // a trade outlet and a useful resource stream.
+  me.hand = { wood: 3, brick: 3, sheep: 1, wheat: 1, ore: 0 };
+  state.phase = "turn";
+  state.current = me.id;
+
+  const port = state.board.vertices["-1,-1|-1,-2|0,-2"];
+  assert.deepEqual(port.port, { ratio: 3 });
+  const road = legalActions(state).find((action) =>
+    action.type === "BUILD_ROAD" && action.edge === "-1,-2|0,-2|0,-3|0,-2|0,-3|1,-3",
+  );
+  assert.ok(road);
+  const target = roadOpenSettlementTarget(state, road, 3);
+  assert.equal(target.contested, false);
+  assert.ok(target.value >= 45, `valuable port route scored only ${target.value}`);
+  assert.ok(target.depth <= 2);
+  assert.equal(roadReservesExpansionLane(state, road), true);
+  assert.ok(heuristicScore(state, road) > heuristicScore(state, legalActions(state).find((action) => action.type === "END_TURN")!));
+});
+
+test("a payable reachable house still beats an unplanned expansion road", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 1, us: "red" });
+  const me = state.players[0];
+  const first = Object.keys(state.board.vertices)[0];
+  me.settlements = [first];
+  const firstRoad = state.board.vertices[first].edges[0];
+  me.roads = [firstRoad];
+  const farEnd = state.board.edges[firstRoad].vertices.find((vertex) => vertex !== first)!;
+  const secondRoad = state.board.vertices[farEnd].edges.find((edge) => edge !== firstRoad);
+  assert.ok(secondRoad);
+  me.roads.push(secondRoad);
+  me.hand = { wood: 2, brick: 2, sheep: 1, wheat: 1, ore: 1 };
+  state.phase = "turn";
+  state.current = me.id;
+
+  const actions = legalActions(state);
+  const house = actions
+    .filter((action) => action.type === "BUILD_SETTLEMENT")
+    .sort((a, b) => heuristicScore(state, b) - heuristicScore(state, a))[0];
+  const roads = actions.filter((action) => action.type === "BUILD_ROAD");
+  assert.ok(house);
+  assert.ok(roads.length > 0);
+  assert.ok(roads.every((road) => !roadReservesExpansionLane(state, road)));
+  assert.ok(heuristicScore(state, house) > Math.max(...roads.map((road) => heuristicScore(state, road))));
+});
+
 test("a one-card house route beats buying a development card in the opening funnel", () => {
   const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
   const me = state.players[0];
