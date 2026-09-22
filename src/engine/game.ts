@@ -828,6 +828,11 @@ function collectDiscards(p: Player, need: number, acts: Action[]): void {
       type: "DISCARD",
       player: p.id,
       discard: {},
+      // Preserve the obligation even when the resource identities are not
+      // observable. The live driver can select exactly this many cards from
+      // Colonist's authoritative hand projection; an empty advice action
+      // used to send zero cards and leave the robber menu half-complete.
+      discardUnknown: need,
       label: `Discard ${need} cards; exact identities are hidden. Keep wheat and ore; dump sheep, wood, brick first`,
     });
     return;

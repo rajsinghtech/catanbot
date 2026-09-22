@@ -628,6 +628,85 @@ export function roadExpansionScore(state: GameState, action: Action): number {
   return score;
 }
 
+function openSettlementVertex(state: GameState, vertex: string): boolean {
+  if (!state.board.vertices[vertex] || vertexOwner(state, vertex)) return false;
+  for (const edgeId of state.board.vertices[vertex].edges) {
+    const edge = state.board.edges[edgeId];
+    if (!edge) continue;
+    const other = edge.vertices[0] === vertex ? edge.vertices[1] : edge.vertices[0];
+    if (vertexOwner(state, other)) return false;
+  }
+  return true;
+}
+
+/**
+ * Find a real open settlement behind a candidate road without pretending the
+ * future road cards are already in hand. `roadExpansionScore` deliberately
+ * mixes frontier value and Longest Road value; the live road guard needs a
+ * narrower topology fact so a short, well-supported approach is distinguishable
+ * from a branch that merely has a high raw road score.
+ */
+export function roadOpenSettlementTarget(
+  state: GameState,
+  action: Action,
+  maxFutureRoads = 3,
+): { value: number; depth: number; contested: boolean } {
+  if (action.type !== "BUILD_ROAD" || !action.edge || !state.board.edges[action.edge]) {
+    return { value: 0, depth: Infinity, contested: false };
+  }
+  const before = player(state, action.player);
+  const beforeReachable = new Set(settlementSpots(state, before, false));
+  const after = cloneState(state);
+  const afterPlayer = player(after, action.player);
+  if (!afterPlayer.roads.includes(action.edge)) afterPlayer.roads.push(action.edge);
+  const opponentFrontier = new Set<string>();
+  for (const opponent of after.players.filter((p) => p.id !== action.player)) {
+    for (const spot of settlementSpots(after, opponent, false)) opponentFrontier.add(spot);
+  }
+
+  const queue: Array<{ vertex: string; depth: number }> = [];
+  const distance = new Map<string, number>();
+  for (const vertex of after.board.edges[action.edge].vertices) {
+    distance.set(vertex, 0);
+    queue.push({ vertex, depth: 0 });
+  }
+  let best = { value: 0, depth: Infinity, contested: false };
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (current.depth > maxFutureRoads) continue;
+    const owner = vertexOwner(after, current.vertex);
+    // Our road may legally terminate at an opposing house, but the network
+    // cannot cross that house to claim a settlement behind it.
+    if (owner && owner !== action.player) continue;
+    if (openSettlementVertex(after, current.vertex) && !beforeReachable.has(current.vertex)) {
+      const value = settlementSpotValue(after, action.player, current.vertex);
+      const contested = opponentFrontier.has(current.vertex);
+      if (value > best.value || (value === best.value && current.depth < best.depth)) {
+        best = { value, depth: current.depth, contested };
+      }
+    }
+    if (current.depth >= maxFutureRoads) continue;
+    const vertex = after.board.vertices[current.vertex];
+    if (!vertex) continue;
+    for (const edgeId of vertex.edges) {
+      const edge = after.board.edges[edgeId];
+      if (!edge) continue;
+      const roadOwner = after.players.find((p) => p.roads.includes(edgeId))?.id;
+      if (roadOwner && roadOwner !== action.player) continue;
+      const next = edge.vertices[0] === current.vertex ? edge.vertices[1] : edge.vertices[0];
+      const nextOwner = vertexOwner(after, next);
+      if (nextOwner && nextOwner !== action.player) continue;
+      // Existing roads do not consume a future road card; an unclaimed edge
+      // does. The candidate edge itself is already owned in `after`.
+      const nextDepth = current.depth + (roadOwner ? 0 : 1);
+      if (nextDepth > maxFutureRoads || nextDepth >= (distance.get(next) ?? Infinity)) continue;
+      distance.set(next, nextDepth);
+      queue.push({ vertex: next, depth: nextDepth });
+    }
+  }
+  return best;
+}
+
 /**
  * Score the first edge of a Road Building pair by the best legal second edge
  * it enables.  A greedy first-edge score routinely chose a pretty branch that
@@ -1588,6 +1667,53 @@ function discardHandAfter(me: GameState["players"][number], action: Action): Han
 }
 
 /**
+ * Production with the robber removed.  A resource can look dead in the
+ * current snapshot only because the robber is sitting on its tile; that is
+ * different from a resource the player's board can never replace.  Discard
+ * decisions should use both values.
+ */
+function potentialProduction(state: GameState, id: string): Record<Resource, number> {
+  const me = player(state, id);
+  const owned = new Set([...me.settlements, ...me.cities]);
+  const out: Record<Resource, number> = { wood: 0, brick: 0, sheep: 0, wheat: 0, ore: 0 };
+  for (const hex of Object.values(state.board.hexes)) {
+    const resource = resourceOf(hex);
+    if (!resource || hex.number == null) continue;
+    const pips = PIP[hex.number] ?? 0;
+    for (const vertex of hex.vertices) {
+      if (!owned.has(vertex)) continue;
+      out[resource] += pips * (me.cities.includes(vertex) ? 2 : 1);
+    }
+  }
+  return out;
+}
+
+function cityUpgradeValue(state: GameState, id: string): number {
+  const me = player(state, id);
+  return Math.max(0, ...me.settlements.map((vertex) => {
+    const v = state.board.vertices[vertex];
+    if (!v) return 0;
+    return v.hexes.reduce((sum, hexId) => {
+      const hex = state.board.hexes[hexId];
+      const resource = resourceOf(hex);
+      const pips = hex.number == null ? 0 : PIP[hex.number] ?? 0;
+      return sum + pips * (resource === "wheat" || resource === "ore" ? 1.7 : 1);
+    }, 0);
+  }));
+}
+
+function bestPortRatio(state: GameState, me: GameState["players"][number], resource: Resource): number {
+  let ratio = 4;
+  for (const vertex of [...me.settlements, ...me.cities]) {
+    const port = state.board.vertices[vertex]?.port;
+    if (!port) continue;
+    if (port.ratio === 3) ratio = Math.min(ratio, 3);
+    if (port.ratio === 2 && port.resource === resource) ratio = 2;
+  }
+  return ratio;
+}
+
+/**
  * Score a discard by the board position it leaves behind. A seven is not a
  * generic "dump low cards" event: the right choice protects the cheapest
  * reachable build, the resource engine that replaces the discarded cards,
@@ -1605,20 +1731,30 @@ function discardBoardValue(state: GameState, action: Action): number {
     me.cities.length > 0 &&
     openHouse
   );
+  const reachableHouseValue = bestReachableSettlementValue(state, action.player);
+  const openHouseValue = bestOpenSettlementValue(state, action.player);
+  const cityValue = cityUpgradeValue(state, action.player);
+  const activeProduction = production(state, action.player);
+  const replaceableProduction = potentialProduction(state, action.player);
   let score = 0;
 
   const goals: Array<{ cost: Hand; weight: number; available: boolean }> = [
     {
       cost: COSTS.settlement,
-      weight: preserveExpansion ? 31 : 24,
+      // A reachable house is worth more than an abstract four-card recipe.
+      // If the network is not connected yet, retain some value for an open
+      // house but do not let it beat a live city engine by itself.
+      weight: reachableHouseValue > 0
+        ? (preserveExpansion ? 34 : 28) + Math.min(18, reachableHouseValue * 0.12)
+        : preserveExpansion ? 23 : openHouse ? 13 : 0,
       available: openHouse && me.settlements.length < 5,
     },
     {
       cost: COSTS.city,
-      weight: preserveExpansion ? 7 : 25,
+      weight: preserveExpansion ? 9 : 22 + Math.min(12, cityValue * 0.12),
       available: me.settlements.length > 0,
     },
-    { cost: COSTS.road, weight: 11, available: openRoad },
+    { cost: COSTS.road, weight: openRoad ? 10 : 0, available: openRoad },
     { cost: COSTS.dev, weight: 7, available: state.deck.length > 0 },
   ];
   for (const goal of goals) {
@@ -1626,35 +1762,49 @@ function discardBoardValue(state: GameState, action: Action): number {
     const beforeMissing = costDistance(me.hand, goal.cost);
     const afterMissing = costDistance(after, goal.cost);
     score += (beforeMissing - afterMissing) * goal.weight;
-    if (afterMissing === 0) score += goal.cost === COSTS.settlement ? 82 : goal.cost === COSTS.city ? 64 : 18;
+    if (afterMissing === 0) {
+      score += goal.cost === COSTS.settlement
+        ? 64 + Math.min(32, reachableHouseValue * 0.2)
+        : goal.cost === COSTS.city
+          ? 46 + Math.min(26, cityValue * 0.25)
+          : goal.cost === COSTS.road ? 18 : 12;
+    }
   }
 
   // A legal house is only valuable when it is connected to the existing road
   // network. Reward preserving a complete route, and distinguish it from an
   // attractive but disconnected hand that cannot actually spend the cards.
   if (openHouse && canPay(after, COSTS.settlement)) {
-    score += 72 + bestReachableSettlementValue(state, action.player) * 0.24;
+    score += 68 + reachableHouseValue * 0.3;
   }
-  if (me.settlements.length > 0 && canPay(after, COSTS.city)) score += preserveExpansion ? 10 : 48;
+  if (me.settlements.length > 0 && canPay(after, COSTS.city)) {
+    score += (preserveExpansion ? 12 : 42) + cityValue * 0.22;
+  }
   if (openRoad && canPay(after, COSTS.road)) score += 18;
 
-  const ownProduction = production(state, action.player);
   const boardProduction = RESOURCES.reduce((sum, resource) => sum + boardPips(state, resource), 0);
   const averageBoardPips = boardProduction / RESOURCES.length;
-  const ports = [...me.settlements, ...me.cities]
-    .map((vertex) => state.board.vertices[vertex]?.port)
-    .filter((port): port is NonNullable<typeof port> => Boolean(port));
   for (const resource of RESOURCES) {
     const discarded = action.discard?.[resource] ?? 0;
     if (!discarded) continue;
     let cardValue = 1.5 + resourcePressure(state, action.player, resource) * 2.4;
-    // A resource the board does not produce for us is harder to replace by
-    // rolling; keep it unless the post-discard hand has already secured the
-    // concrete route above. High own production is comparatively replaceable.
-    if (ownProduction[resource] <= 0) cardValue += 3.2;
-    else if (ownProduction[resource] >= 8) cardValue -= 1.4;
+    // A resource the board cannot produce for us is genuinely scarce. A
+    // currently blocked resource is not: the robber can move, so use the
+    // unblocked ceiling before deciding it is safe to throw away.
+    if (replaceableProduction[resource] <= 0) cardValue += 5.2;
+    else if (replaceableProduction[resource] <= 2) cardValue += 2.8;
+    else if (replaceableProduction[resource] >= 8) cardValue -= 1.8;
+    if (activeProduction[resource] === 0 && replaceableProduction[resource] > 0) cardValue -= 0.7;
     if (averageBoardPips > 0 && boardPips(state, resource) < averageBoardPips * 0.8) cardValue += 1.2;
-    if (ports.some((port) => port.ratio === 2 && port.resource === resource) && after[resource] >= 2) cardValue += 2.8;
+    const ratio = bestPortRatio(state, me, resource);
+    if (ratio === 2) {
+      const beforePairs = Math.floor(me.hand[resource] / 2);
+      const afterPairs = Math.floor(after[resource] / 2);
+      if (beforePairs > afterPairs) cardValue += 5.2;
+      else if (after[resource] >= 2) cardValue += 2.2;
+    } else if (ratio === 3 && Math.floor(me.hand[resource] / 3) > Math.floor(after[resource] / 3)) {
+      cardValue += 2.2;
+    }
     score -= discarded * cardValue;
   }
   return score;

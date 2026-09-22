@@ -5,7 +5,7 @@ import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
 import { newGame, legalActions, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
-import { forcedWin, heuristicScore, roadExpansionScore, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
+import { forcedWin, heuristicScore, roadExpansionScore, roadOpenSettlementTarget, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
 import { decide } from "../src/policy/jev.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
@@ -103,6 +103,7 @@ test("unknown discard state gives advice instead of inventing card identities", 
   const action = legalActions(state)[0];
   assert.equal(action.type, "DISCARD");
   assert.deepEqual(action.discard, {});
+  assert.equal(action.discardUnknown, 2);
   assert.match(action.label, /exact identities are hidden/i);
   assert.match(action.label, /keep wheat and ore/i);
 });
@@ -606,6 +607,26 @@ test("a road ending at an opponent settlement is treated as a dead zone", () => 
   assert.ok(heuristicScore(state, road) < heuristicScore(state, endTurn));
 });
 
+test("a bounded open settlement route can justify an approach road with one spare road card", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 1, us: "red" });
+  const me = state.players[0];
+  me.settlements = ["0,-1|0,-2|1,-2", "0,-2|0,-3|1,-3"];
+  me.roads = [
+    "0,-1|0,-2|1,-2|0,-2|1,-2|1,-3",
+    "0,-2|0,-3|1,-3|0,-2|1,-2|1,-3",
+  ];
+  me.hand = { wood: 3, brick: 1, sheep: 1, wheat: 1, ore: 0 };
+  state.phase = "turn";
+  state.current = me.id;
+
+  const road = legalActions(state)
+    .filter((action) => action.type === "BUILD_ROAD")
+    .map((action) => ({ action, target: roadOpenSettlementTarget(state, action, 3) }))
+    .find(({ target }) => target.value > 45 && target.depth <= 2);
+  assert.ok(road);
+  assert.equal(road.target.contested, false);
+});
+
 test("a one-card house route beats buying a development card in the opening funnel", () => {
   const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
   const me = state.players[0];
@@ -649,6 +670,31 @@ test("opening-funnel discard enumeration keeps the expansion hand and drops ore 
   assert.equal(best.discard?.brick ?? 0, 0);
   assert.equal(best.discard?.sheep ?? 0, 0);
   assert.equal(best.discard?.wheat ?? 0, 1);
+  assert.equal(best.discard?.ore, 3);
+});
+
+test("board-aware discard preserves a two-for-one expansion port pair", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 4, us: "red" });
+  const me = state.players[0];
+  const portVertex = "0,-2|1,-2|1,-3";
+  const other = Object.keys(state.board.vertices).find((vertex) =>
+    vertex !== portVertex && !state.board.vertices[portVertex].edges.some((edge) =>
+      state.board.edges[edge].vertices.includes(vertex),
+    ),
+  );
+  assert.ok(other);
+  me.settlements = [portVertex, other];
+  me.roads = [state.board.vertices[portVertex].edges[0], state.board.vertices[other].edges[0]];
+  me.hand = { wood: 3, brick: 2, sheep: 2, wheat: 2, ore: 3 };
+  state.phase = "discard";
+  state.current = me.id;
+  state.mustDiscard[me.id] = 6;
+
+  const best = legalActions(state)
+    .filter((action) => action.type === "DISCARD")
+    .sort((a, b) => heuristicScore(state, b) - heuristicScore(state, a))[0];
+  assert.ok(best);
+  assert.equal(best.discard?.wood ?? 0, 0);
   assert.equal(best.discard?.ore, 3);
 });
 

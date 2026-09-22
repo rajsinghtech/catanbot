@@ -6,7 +6,7 @@ import { EMPTY_DEVS, type DevHand, type GameState, type Recommendation, type Res
 import { applyAction, legalActions, newGame, refreshAwards, stealCandidates, syncSetupFromPieces, totalVP, visibleVP } from "./engine/game.ts";
 import { opponentThreat, production, winRoute } from "./engine/features.ts";
 import { decide, jevStatus, printRec } from "./policy/jev.ts";
-import { heuristicScore } from "./policy/doctrine.ts";
+import { heuristicScore, roadExpansionScore, roadOpenSettlementTarget } from "./policy/doctrine.ts";
 import { decodeIncoming, liveSeatsFromPayload } from "./colonist/ws.ts";
 import { parseLogLine } from "./colonist/log.ts";
 import { applyLogEvent, applyOccupancyFromMapState, observedMapPieces } from "./colonist/apply.ts";
@@ -741,6 +741,38 @@ export async function refreshRec(force = false): Promise<Recommendation> {
               target: "board piece metadata",
             }
           : await decide(game);
+      if (process.env.CATANBOT_DEBUG_DISCARD === "1" && nextRec.action.type === "DISCARD") {
+        const holder = game.players.find((p) => p.id === nextRec.action.player);
+        const rankedDiscards = legalActions(game)
+          .filter((action) => action.type === "DISCARD")
+          .sort((a, b) => heuristicScore(game, b) - heuristicScore(game, a))
+          .slice(0, 5)
+          .map((action) => ({ discard: action.discard, score: heuristicScore(game, action) }));
+        console.log("discard-choice", JSON.stringify({
+          phase: game.phase,
+          current: game.current,
+          roller: game.roller,
+          player: nextRec.action.player,
+          hand: holder?.hand,
+          production: holder ? production(game, holder.id) : null,
+          discard: nextRec.action.discard,
+          top: rankedDiscards,
+        }));
+      }
+      if (process.env.CATANBOT_DEBUG_ROAD === "1" && nextRec.action.type === "BUILD_ROAD") {
+        const holder = game.players.find((p) => p.id === nextRec.action.player);
+        const target = roadOpenSettlementTarget(game, nextRec.action, 3);
+        console.log("road-choice", JSON.stringify({
+          phase: game.phase,
+          current: game.current,
+          player: nextRec.action.player,
+          hand: holder?.hand,
+          roads: holder?.roads.length,
+          edge: nextRec.action.edge,
+          score: roadExpansionScore(game, nextRec.action),
+          target,
+        }));
+      }
       const afterFingerprint = decisionFingerprint();
       const afterContextFingerprint = decisionContextFingerprint();
       const contextStable = afterContextFingerprint === contextFingerprint;
