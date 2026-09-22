@@ -6,7 +6,7 @@ import { EMPTY_DEVS, type DevHand, type GameState, type Recommendation, type Res
 import { applyAction, legalActions, newGame, refreshAwards, stealCandidates, syncSetupFromPieces, totalVP, visibleVP } from "./engine/game.ts";
 import { opponentThreat, production, winRoute } from "./engine/features.ts";
 import { decide, jevStatus, printRec } from "./policy/jev.ts";
-import { heuristicScore, roadExpansionScore, roadOpenSettlementTarget } from "./policy/doctrine.ts";
+import { heuristicScore, longestRoadPlanScore, roadExpansionScore, roadOpenSettlementTarget } from "./policy/doctrine.ts";
 import { decodeIncoming, liveSeatsFromPayload } from "./colonist/ws.ts";
 import { parseLogLine } from "./colonist/log.ts";
 import { applyLogEvent, applyOccupancyFromMapState, observedMapPieces } from "./colonist/apply.ts";
@@ -785,6 +785,7 @@ export async function refreshRec(force = false): Promise<Recommendation> {
       if (process.env.CATANBOT_DEBUG_ROAD === "1" && nextRec.action.type === "BUILD_ROAD") {
         const holder = game.players.find((p) => p.id === nextRec.action.player);
         const target = roadOpenSettlementTarget(game, nextRec.action, 3);
+        const plan = longestRoadPlanScore(game, nextRec.action);
         console.log("road-choice", JSON.stringify({
           phase: game.phase,
           current: game.current,
@@ -794,7 +795,31 @@ export async function refreshRec(force = false): Promise<Recommendation> {
           edge: nextRec.action.edge,
           score: roadExpansionScore(game, nextRec.action),
           target,
+          plan,
         }));
+      }
+      if (process.env.CATANBOT_DEBUG_ROAD === "1" && nextRec.action.type !== "BUILD_ROAD") {
+        const roads = legalActions(game)
+          .filter((action) => action.type === "BUILD_ROAD")
+          .map((action) => ({
+            action,
+            score: heuristicScore(game, action),
+            frontier: roadExpansionScore(game, action),
+            plan: longestRoadPlanScore(game, action),
+          }))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 2);
+        if (roads.length) {
+          const holder = game.players.find((p) => p.id === nextRec.action.player);
+          console.log("road-suppressed", JSON.stringify({
+            chosen: nextRec.action.type,
+            chosenScore: heuristicScore(game, nextRec.action),
+            player: nextRec.action.player,
+            hand: holder?.hand,
+            roads: holder?.roads.length,
+            top: roads,
+          }));
+        }
       }
       debugTradeChoice(nextRec.action);
       const afterFingerprint = decisionFingerprint();
