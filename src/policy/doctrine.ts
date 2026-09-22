@@ -667,6 +667,22 @@ function yearOfPlentyActionValue(state: GameState, action: Action): number {
   if (canPay(after, COSTS.settlement) && settlementSpots(state, me, false).length > 0) score += 58;
   if (canPay(after, COSTS.city) && me.settlements.length > 0) score += 70;
 
+  // Once the player has three or more buildings, the reliable two-point
+  // route is usually a city/development engine rather than another expansion
+  // detour. If ore is already in hand and wheat is the only city hinge, make
+  // YOP explicitly choose wheat (including wheat + wheat) instead of a
+  // generic resource pair. This is the live failure mode where the bot took
+  // wood + sheep and remained one wheat short while an opponent was on 9 VP.
+  if (me.settlements.length + me.cities.length >= 3 && me.settlements.length > 0) {
+    const cityWheatMissing = Math.max(0, COSTS.city.wheat - me.hand.wheat);
+    const cityOreMissing = Math.max(0, COSTS.city.ore - me.hand.ore);
+    const wheatAdded = resources.filter((resource) => resource === "wheat").length;
+    const oreAdded = resources.filter((resource) => resource === "ore").length;
+    if (cityOreMissing === 0 && cityWheatMissing > 0) score += wheatAdded * 58;
+    if (cityWheatMissing === 0 && cityOreMissing > 0) score += oreAdded * 46;
+    if (cityWheatMissing > 0 && cityOreMissing > 0 && wheatAdded > 0 && oreAdded > 0) score += 48;
+  }
+
   for (const resource of resources) {
     if (me.hand[resource] === 0) score += 11;
     if (resource === "wheat" || resource === "ore") score += 5;
