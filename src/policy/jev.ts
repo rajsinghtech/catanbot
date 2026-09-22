@@ -80,15 +80,19 @@ function gatewayCoolingDown(): boolean {
   return Date.now() < gatewayCooldownUntil;
 }
 
-function setupWheatProduction(state: GameState, action: Action): number {
+function setupProduction(state: GameState, action: Action, resource: keyof ReturnType<typeof production>): number {
   if (state.phase !== "setup_settle" || action.type !== "PLACE_SETTLEMENT" || !action.vertex) return 0;
   try {
     const after = cloneState(state);
     applyAction(after, action, () => 0.5);
-    return production(after, action.player).wheat;
+    return production(after, action.player)[resource];
   } catch {
     return 0;
   }
+}
+
+function setupWheatProduction(state: GameState, action: Action): number {
+  return setupProduction(state, action, "wheat");
 }
 
 function setupDoctrinePick(state: GameState, actions: Action[]): Action | null {
@@ -97,7 +101,22 @@ function setupDoctrinePick(state: GameState, actions: Action[]): Action | null {
   if (!settlements.length) return null;
   const me = state.players.find((player) => player.id === state.current);
   if (!me) return null;
-  return settlements
+  let viable = settlements;
+  const before = production(state, state.current);
+  const expansion = ["wood", "brick"] as const;
+  const firstExpansion = settlements.filter((action) => expansion.some((resource) => setupProduction(state, action, resource) > 0));
+  if (me.settlements.length === 0 && firstExpansion.length) {
+    // A high-pip wheat/ore corner with no road resource is not a viable
+    // opening when the board still offers wood or brick. Keep JEV inside the
+    // resource-complete opening set instead of trying to repair this with
+    // several player trades later.
+    viable = firstExpansion;
+  } else if (me.settlements.length > 0) {
+    const missingExpansion = expansion.filter((resource) => before[resource] <= 0);
+    const complement = settlements.filter((action) => missingExpansion.some((resource) => setupProduction(state, action, resource) > 0));
+    if (missingExpansion.length && complement.length) viable = complement;
+  }
+  return viable
     .map((action) => ({
       action,
       score: me.settlements.length === 0
