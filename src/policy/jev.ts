@@ -315,6 +315,14 @@ export async function decide(state: GameState): Promise<Recommendation> {
       }
     }
     if (setupBest) picked = setupBest;
+    // JEV is the strategic evaluator, but a remote operation choice must not
+    // throw away a materially stronger legal VP/build route. Keep the model's
+    // choice when it is a close call; fall back to the doctrine when the
+    // selected action is clearly dominated (the live failure mode was passing
+    // or buying a low-tempo card while an immediate city/settlement existed).
+    if (heuristicScore(state, picked) + 18 < heuristicScore(state, guardedMockBest)) {
+      picked = guardedMockBest;
+    }
     const conf = answers.operation?.confidence ?? answers.operation?.probabilities?.[op] ?? 0.6;
     return format(
       state,

@@ -95,6 +95,46 @@ test("JEV target guard keeps the second setup settlement strategically complete"
   }
 });
 
+test("JEV cannot replace a materially stronger direct VP build with a pass", async () => {
+  const env = {
+    AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
+    JEV_CALLS_PER_EPOCH: process.env.JEV_CALLS_PER_EPOCH,
+  };
+  const previousFetch = globalThis.fetch;
+  process.env.AI_GATEWAY_API_KEY = "test-gateway-key";
+  process.env.JEV_CALLS_PER_EPOCH = "1";
+  globalThis.fetch = (async (_input, init) => {
+    const request = JSON.parse(String(init?.body));
+    const operations = Object.keys(request.questions.operation.criteria);
+    const operation = operations[operations.length - 1];
+    const targetKey = `${operation.toLowerCase()}_target`;
+    const targetCriteria = request.questions[targetKey]?.criteria ?? {};
+    const target = Object.keys(targetCriteria)[0];
+    return new Response(JSON.stringify({
+      answers: {
+        operation: { choice: operation, confidence: 0.99 },
+        ...(target ? { [targetKey]: { choice: target } } : {}),
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const state = newGame({ playerCount: 2 }, { seed: 12, us: "red" });
+    state.players[0].settlements = [Object.keys(state.board.vertices)[0]];
+    state.players[0].hand = { wood: 0, brick: 0, sheep: 0, wheat: 2, ore: 3 };
+    state.current = "red";
+    state.phase = "turn";
+    state.turn = 1;
+    state.dice = [6, 6];
+    const rec = await decide(state);
+    assert.equal(rec.source, "jev");
+    assert.equal(rec.action.type, "BUILD_CITY");
+  } finally {
+    globalThis.fetch = previousFetch;
+    restoreEnv(env);
+  }
+});
+
 test("the live OpenAI-compatible proxy can run the same JEV question contract", async () => {
   const env = {
     AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
