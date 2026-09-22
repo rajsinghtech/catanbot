@@ -5,7 +5,7 @@ import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
 import { newGame, legalActions, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
-import { heuristicScore, settlementPairScore } from "../src/policy/doctrine.ts";
+import { heuristicScore, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
   return { ...parseLogLine(text, icons), ...extra };
@@ -251,6 +251,32 @@ test("near-win hidden hands make Monopoly target the opponent's strongest produc
   const best = choices.slice().sort((a, b) => heuristicScore(state, b) - heuristicScore(state, a))[0];
   assert.equal(visibleVP(state, opponent.id), 8);
   assert.equal(best.resource, expected);
+});
+
+test("two-settlement funnel prefers a road route over spending the near-house hand on a dev card", () => {
+  const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  const first = vertices[0];
+  const firstRoad = state.board.vertices[first].edges[0];
+  const second = vertices.find((vertex) => vertex !== first && !state.board.vertices[first].edges.some((edge) =>
+    state.board.edges[edge].vertices.includes(vertex),
+  ));
+  assert.ok(second);
+  me.settlements = [first, second];
+  me.roads = [firstRoad];
+  me.hand = { wood: 1, brick: 1, sheep: 1, wheat: 1, ore: 1 };
+  state.phase = "turn";
+  state.current = me.id;
+  state.turn = 1;
+
+  const road = legalActions(state).find(
+    (action) => action.type === "BUILD_ROAD" && settlementRouteAfterRoad(state, action) > 0,
+  );
+  const buyDev = legalActions(state).find((action) => action.type === "BUY_DEV");
+  assert.ok(road);
+  assert.ok(buyDev);
+  assert.ok(heuristicScore(state, road) > heuristicScore(state, buyDev));
 });
 
 test("won the game log sets the Colonist winner", () => {

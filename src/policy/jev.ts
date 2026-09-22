@@ -9,6 +9,7 @@ import {
   OPERATION_RULES,
   roadExpansionScore,
   settlementPairScore,
+  settlementRouteAfterRoad,
   setupSecondSettlementScore,
   TARGET_RULES,
 } from "./doctrine.ts";
@@ -353,11 +354,14 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
   const plan = longestRoadPlanScore(state, action);
   if ((plan.claimNow && plan.secureNow) || plan.defendNow) return true;
   if (plan.claimSoon && plan.secureSoon && (plan.roadsToGoal ?? 99) <= 2) return true;
+  const me = state.players.find((player) => player.id === action.player);
+  if ((me?.settlements.length ?? 0) === 2 && (me?.cities.length ?? 0) === 0 && settlementRouteAfterRoad(state, action) > 0) {
+    return true;
+  }
   // A fresh frontier can justify the first few roads, but once three paid
   // roads are down the network must prove an actual award swing or immediate
   // settlement route before consuming another wood/brick pair. This keeps a
   // pretty but unsecured Longest Road chase from starving the VP engine.
-  const me = state.players.find((p) => p.id === action.player);
   if ((me?.roads.length ?? 0) >= 3) return false;
   return roadExpansionScore(state, action) >= 52;
 }

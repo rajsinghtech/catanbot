@@ -227,6 +227,54 @@ function bestReachableSettlementValue(state: GameState, id: string): number {
   return Math.max(0, ...spots.map((vertex) => settlementSpotValue(state, id, vertex)));
 }
 
+/**
+ * The first two settlements are the opening; the third settlement is the
+ * expansion funnel.  A common weak-game pattern is to have two houses, pay
+ * the wood/brick needed to point a road somewhere, then spend the remaining
+ * wheat/sheep/ore on dev cards before that road can become a house.  Keep the
+ * policy aware of whether a road actually creates a reachable settlement so
+ * this phase is treated as a conversion problem rather than a raw road race.
+ */
+export function settlementRouteAfterRoad(state: GameState, action: Action): number {
+  if (action.type !== "BUILD_ROAD" || !action.edge) return 0;
+  const after = cloneState(state);
+  const p = player(after, action.player);
+  if (!p.roads.includes(action.edge)) p.roads.push(action.edge);
+  if (state.phase !== "road_building") {
+    p.hand.wood = Math.max(0, p.hand.wood - COSTS.road.wood);
+    p.hand.brick = Math.max(0, p.hand.brick - COSTS.road.brick);
+  }
+  return bestReachableSettlementValue(after, action.player);
+}
+
+function thirdSettlementFunnel(state: GameState, id: string): {
+  active: boolean;
+  missing: number;
+  cityMissing: number;
+  reachableValue: number;
+  bestRoadRoute: number;
+} {
+  const me = player(state, id);
+  const active = me.settlements.length === 2 && me.cities.length === 0;
+  if (!active) {
+    return { active: false, missing: 99, cityMissing: 99, reachableValue: 0, bestRoadRoute: 0 };
+  }
+  const roads = roadSpots(state, me).map((edge) => settlementRouteAfterRoad(state, {
+    id: `FUNNEL:${edge}`,
+    type: "BUILD_ROAD",
+    player: id,
+    edge,
+    label: "funnel road",
+  })).sort((a, b) => b - a);
+  return {
+    active,
+    missing: costDistance(me.hand, COSTS.settlement),
+    cityMissing: costDistance(me.hand, COSTS.city),
+    reachableValue: bestReachableSettlementValue(state, id),
+    bestRoadRoute: roads[0] ?? 0,
+  };
+}
+
 function vertexOwner(state: GameState, vertex: string): string | undefined {
   return state.players.find((p) => p.settlements.includes(vertex) || p.cities.includes(vertex))?.id;
 }
@@ -659,6 +707,14 @@ export function setupSecondSettlementScore(state: GameState, id: string, vertex:
   const expansion = ["wood", "brick", "sheep", "wheat"] as const;
   for (const resource of expansion) {
     if (before[resource] <= 0 && after[resource] > 0) score += 24;
+    if (resource === "brick" && before.brick <= 0 && after.brick > 0) {
+      // Brick is not interchangeable with a generic extra resource in the
+      // reverse-order pick: it is the card that turns the first pair into a
+      // road and then a third settlement.  When the opening house has no
+      // brick, prefer a viable brick corner even if a wheat/sheep corner has
+      // slightly prettier raw pips.
+      score += 55;
+    }
     // A pair with no brick/wood/sheep is not merely a little less balanced:
     // it cannot make the next settlement without repeated trades. Treat a
     // missing expansion resource as a strategic veto unless the map makes it
@@ -679,7 +735,7 @@ export function setupSecondSettlementScore(state: GameState, id: string, vertex:
         // development-card routes depend on repeated player trades. Keep the
         // diversity veto close to the wheat veto so raw pips cannot hide that
         // tempo loss in 4-player openings.
-        score -= resource === "sheep" ? 94 : 70;
+        score -= resource === "sheep" ? 94 : resource === "brick" ? 82 : 70;
       }
     }
     if (starting[resource] > 0) score += 3;
@@ -785,6 +841,24 @@ export function settlementPairScore(state: GameState, action: Action): number {
   const complement = likelyComplement(state, action);
   const denial = opponentDenial(state, action.player, action.vertex);
   let score = current + (complement?.score ?? 0) * 0.9 + denial * 2.2;
+
+  // A first house that only has wheat/ore/wood can look excellent on pips
+  // while leaving the reverse-order player with no reliable sheep or brick.
+  // Competitive openings need an expansion resource shape, not just a high
+  // expected-card total: the pair must be able to make a road and settlement
+  // before dev-card tempo becomes relevant. Keep the penalty small enough
+  // that an exceptional 6/8/5 corner can still win, but reject the common
+  // two-resource trap when both brick and sheep are absent from the first
+  // house.
+  const firstResources = new Set<Resource>();
+  for (const hid of state.board.vertices[action.vertex]?.hexes ?? []) {
+    const resource = resourceOf(state.board.hexes[hid]);
+    if (resource) firstResources.add(resource);
+  }
+  const firstExpansion = ["wood", "brick", "sheep", "wheat"] as const;
+  score += firstExpansion.filter((resource) => firstResources.has(resource)).length * 22;
+  if (!firstResources.has("brick") && !firstResources.has("sheep")) score -= 70;
+  if (!firstResources.has("wood") && !firstResources.has("brick")) score -= 42;
 
   // The first house is not a standalone pip-maximization problem.  A pair
   // with no wood or brick production can be trapped for many turns even when
@@ -908,6 +982,7 @@ export function heuristicScore(state: GameState, action: Action): number {
   const myVp = totalVP(state, us);
   const endgame = myVp >= state.config.victoryPoints - 4 || oppVp >= state.config.victoryPoints - 4;
   const opponentNearWin = opp.some((p) => visibleVP(state, p.id) >= state.config.victoryPoints - 2);
+  const funnel = thirdSettlementFunnel(state, us);
 
   // Add a direct win-sequence defense layer before operation-specific
   // heuristics.  A good self-build is still secondary when a settlement,
@@ -1000,6 +1075,20 @@ export function heuristicScore(state: GameState, action: Action): number {
         }
         const canBuildCity = me.cities.length < 4 && me.settlements.length > 0 && canPay(me.hand, COSTS.city);
         if (canBuildCity) s -= 22;
+        if (funnel.active && !secureAwardSwing) {
+          const routeAfter = settlementRouteAfterRoad(state, action);
+          if (routeAfter > 0 && funnel.reachableValue <= 0) {
+            // This is the useful road: it immediately turns the network into
+            // a legal third-settlement route.  Let it beat a passive dev
+            // purchase even when the house still needs one more roll/trade.
+            s += 34 + routeAfter * 0.22;
+          } else if (routeAfter <= 0 && funnel.reachableValue <= 0) {
+            // A road that still does not expose a house is speculation during
+            // the two-settlement phase.  It must prove a secure award swing
+            // before taking priority over the conversion funnel.
+            s -= 24;
+          }
+        }
       }
       for (const rival of opp) {
         if (!roadSpots(state, rival).includes(action.edge!)) continue;
@@ -1037,6 +1126,16 @@ export function heuristicScore(state: GameState, action: Action): number {
       // the hand happens to contain sheep-wheat-ore.
       if (settlementSpots(state, me, false).length === 0) s += 8;
       if (endgame) s += 10;
+      if (funnel.active) {
+        // A dev card is a secondary conversion while the player still has
+        // only the opening pair.  In particular, spending sheep/wheat/ore
+        // for a card while missing wood/brick creates the long stalls seen in
+        // the losing traces.  Keep the card available when the route is
+        // blocked, but make it lose to a real expansion route.
+        if (funnel.missing <= 2 && funnel.reachableValue > 0) s -= 48;
+        else if (funnel.missing <= 3 && (funnel.reachableValue > 0 || funnel.bestRoadRoute > 0)) s -= 28;
+        else if (funnel.missing <= 3) s -= 12;
+      }
       break;
     case "PLAY_KNIGHT": {
       s += 12;
@@ -1185,6 +1284,14 @@ export function heuristicScore(state: GameState, action: Action): number {
         }
         if (get === "wheat" || get === "ore") s += 6;
         if (get === "brick" || get === "wood") s += 3;
+        if (funnel.active) {
+          const beforeMissing = costDistance(me.hand, COSTS.settlement);
+          const afterMissing = costDistance(after, COSTS.settlement);
+          const progress = beforeMissing - afterMissing;
+          if (progress > 0) s += 20 + progress * 12;
+          if (canPay(after, COSTS.settlement) && settlementSpots(state, me, false).length > 0) s += 48;
+          if (progress <= 0 && funnel.reachableValue <= 0 && funnel.bestRoadRoute <= 0) s -= 10;
+        }
       }
       break;
     }
