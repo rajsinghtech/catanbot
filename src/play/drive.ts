@@ -1142,6 +1142,12 @@ async function main() {
   while (streak < 3 && Date.now() - sessionStart < 50 * 60 * 1000) {
   let last = "";
   let lastAt = 0;
+  let boardPending: {
+    actionId: string;
+    click: Click;
+    sentAt: number;
+    attempts: number;
+  } | null = null;
   let fireAndForgetPending: {
     actionId: string;
     actionType: string;
@@ -1307,6 +1313,36 @@ async function main() {
       click.tradeId &&
       tradeResponded.has(click.tradeId)
     ) continue;
+    if (boardPending && boardPending.actionId !== click.actionId) boardPending = null;
+    if (click.kind === "board" && boardPending?.actionId === click.actionId) {
+      const age = Date.now() - boardPending.sentAt;
+      if (age < 1800) continue;
+      if (boardPending.attempts < 2) {
+        const retry = await actuateWithRetry(click);
+        boardPending = {
+          actionId: click.actionId,
+          click,
+          sentAt: Date.now(),
+          attempts: boardPending.attempts + 1,
+        };
+        console.log("board-retry", click.actionType ?? click.prep ?? click.actionId, retry.ok ? "sent" : retry.reason ?? "failed");
+        continue;
+      }
+      // The first sender can return normally while Colonist leaves the same
+      // menu open. Release the bridge intent after bounded retries so the
+      // next poll can re-read the authoritative action state and retry a
+      // fresh target instead of waiting forever on one stale road click.
+      console.log("board-action-timeout", click.actionType ?? click.prep ?? click.actionId);
+      await json(`${BRIDGE}/api/played`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ actionId: `CLEAR:${click.actionId}` }),
+      }).catch(() => {});
+      boardPending = null;
+      last = "";
+      lastAt = 0;
+      continue;
+    }
     const fireAndForgetUi = click.actionType === "BUY_DEV" || click.actionType === "MARITIME_TRADE";
     if (fireAndForgetPending && fireAndForgetPending.actionId !== click.actionId) {
       fireAndForgetPending = null;
@@ -1454,6 +1490,9 @@ async function main() {
       const parsedState = Number(result.state);
       if (Number.isFinite(parsedState)) dispatchedAppActionState = parsedState;
       acted = true;
+      if (result.mode === "action") {
+        boardPending = { actionId: click.actionId, click, sentAt: Date.now(), attempts: 0 };
+      }
       recordIntent = result.mode === "action";
     }
     if (!acted) continue;

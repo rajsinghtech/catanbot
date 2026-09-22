@@ -8,6 +8,8 @@ import {
   longestRoadPlanScore,
   OPERATION_RULES,
   roadExpansionScore,
+  settlementPairScore,
+  setupSecondSettlementScore,
   TARGET_RULES,
 } from "./doctrine.ts";
 
@@ -86,6 +88,22 @@ function setupWheatProduction(state: GameState, action: Action): number {
   } catch {
     return 0;
   }
+}
+
+function setupDoctrinePick(state: GameState, actions: Action[]): Action | null {
+  if (state.phase !== "setup_settle") return null;
+  const settlements = actions.filter((action) => action.type === "PLACE_SETTLEMENT" && action.vertex);
+  if (!settlements.length) return null;
+  const me = state.players.find((player) => player.id === state.current);
+  if (!me) return null;
+  return settlements
+    .map((action) => ({
+      action,
+      score: me.settlements.length === 0
+        ? settlementPairScore(state, action)
+        : setupSecondSettlementScore(state, state.current, action.vertex!),
+    }))
+    .sort((a, b) => b.score - a.score || heuristicScore(state, b.action) - heuristicScore(state, a.action))[0].action;
 }
 
 function noteGatewaySuccess(): void {
@@ -214,12 +232,21 @@ export async function decide(state: GameState): Promise<Recommendation> {
 
   const candidates = [...byType.values()].flat();
   const mockBest = ranked[0].a;
+  const setupBest = setupDoctrinePick(state, legal);
   const bestDirectBuild = ranked.find((entry) => entry.a.type === "BUILD_SETTLEMENT" || entry.a.type === "BUILD_CITY");
   const bestNonRoad = ranked.find((entry) => entry.a.type !== "BUILD_ROAD" && entry.a.type !== "PLACE_ROAD");
   let guardedMockBest =
     mockBest.type === "BUILD_ROAD" && bestDirectBuild && bestDirectBuild.s + 12 >= heuristicScore(state, mockBest)
       ? bestDirectBuild.a
       : mockBest;
+
+  // Setup settlement choice is a high-leverage opening constraint, not a
+  // normal target-ranking question. JEV still evaluates the operation and
+  // supplies the strategic framework, but its target cannot discard the
+  // pair/coverage model and select a pretty high-pip corner that strands the
+  // next two builds. This is the concrete guardrail for the bad live games
+  // where the second house repeated wheat and skipped sheep/ore coverage.
+  if (setupBest) guardedMockBest = setupBest;
 
   if (guardedMockBest.type === "BUILD_ROAD" && bestNonRoad && !roadHasStrategicProof(state, guardedMockBest)) {
     guardedMockBest = bestNonRoad.a;
@@ -287,6 +314,7 @@ export async function decide(state: GameState): Promise<Recommendation> {
           .sort((a, b) => heuristicScore(state, b) - heuristicScore(state, a))[0];
       }
     }
+    if (setupBest) picked = setupBest;
     const conf = answers.operation?.confidence ?? answers.operation?.probabilities?.[op] ?? 0.6;
     return format(
       state,

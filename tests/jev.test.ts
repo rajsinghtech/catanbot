@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { legalActions, newGame } from "../src/engine/game.ts";
+import { setupSecondSettlementScore } from "../src/policy/doctrine.ts";
 import { decide } from "../src/policy/jev.ts";
 
 function restoreEnv(values: Record<string, string | undefined>): void {
@@ -42,6 +43,52 @@ test("JEV gateway answers are used instead of silently falling back", async () =
     assert.equal(rec.source, "jev");
     assert.ok(legalActions(state).some((action) => action.id === rec.action.id));
     assert.match(rec.reason, /JEV selected/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    restoreEnv(env);
+  }
+});
+
+test("JEV target guard keeps the second setup settlement strategically complete", async () => {
+  const env = {
+    AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
+    JEV_CALLS_PER_EPOCH: process.env.JEV_CALLS_PER_EPOCH,
+  };
+  const previousFetch = globalThis.fetch;
+  let calls = 0;
+  process.env.AI_GATEWAY_API_KEY = "test-gateway-key";
+  process.env.JEV_CALLS_PER_EPOCH = "1";
+  globalThis.fetch = (async (_input, init) => {
+    calls += 1;
+    const request = JSON.parse(String(init?.body));
+    const operation = Object.keys(request.questions.operation.criteria)[0];
+    const targetKey = `${operation.toLowerCase()}_target`;
+    const target = Object.keys(request.questions[targetKey].criteria)[0];
+    return new Response(JSON.stringify({
+      answers: {
+        operation: { choice: operation, confidence: 0.91 },
+        [targetKey]: { choice: target },
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const state = newGame({ playerCount: 4 }, { seed: 1, us: "red" });
+    const first = legalActions(state).find((action) => action.type === "PLACE_SETTLEMENT");
+    assert.ok(first?.vertex);
+    state.players[0].settlements = [first.vertex];
+    state.current = "red";
+    state.phase = "setup_settle";
+    state.setupForward = false;
+    state.setupIndex = 0;
+    const candidates = legalActions(state).filter((action) => action.type === "PLACE_SETTLEMENT");
+    const expected = candidates
+      .slice()
+      .sort((a, b) => setupSecondSettlementScore(state, "red", b.vertex!) - setupSecondSettlementScore(state, "red", a.vertex!))[0];
+    const rec = await decide(state);
+    assert.equal(calls, 1);
+    assert.equal(rec.source, "jev");
+    assert.equal(rec.action.id, expected.id);
   } finally {
     globalThis.fetch = previousFetch;
     restoreEnv(env);
