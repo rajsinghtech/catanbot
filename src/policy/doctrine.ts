@@ -934,6 +934,16 @@ export function settlementPairScore(state: GameState, action: Action): number {
 
 export const setupSettlementPairScore = settlementPairScore;
 
+function knightWouldTakeLargestArmy(state: GameState, id: string): boolean {
+  const me = player(state, id);
+  if (state.largestArmy === id || me.knightsPlayed + 1 < 3) return false;
+  const strongestOther = Math.max(
+    0,
+    ...state.players.filter((p) => p.id !== id).map((p) => p.knightsPlayed),
+  );
+  return me.knightsPlayed + 1 > strongestOther;
+}
+
 export function forcedWin(state: GameState): Action | null {
   const acts = legalActions(state);
   for (const a of acts) {
@@ -948,6 +958,12 @@ export function forcedWin(state: GameState): Action | null {
         const held = state.longestRoad ? roadLength(state, state.longestRoad) : 4;
         if (len + 1 > held && len + 1 >= 5) return a;
       }
+    }
+    if (a.type === "PLAY_KNIGHT" && knightWouldTakeLargestArmy(state, a.player)) {
+      // Largest Army is a hidden two-VP swing just like Longest Road. A
+      // third knight can be the immediate win even when no city or house is
+      // payable, so it belongs in the forced-win layer.
+      if (totalVP(state, a.player) + 2 >= state.config.victoryPoints) return a;
     }
   }
   return null;
@@ -1270,6 +1286,10 @@ export function heuristicScore(state: GameState, action: Action): number {
         .slice()
         .sort((a, b) => totalVP(state, b.id) - totalVP(state, a.id))[0];
       if (me.knightsPlayed === 2) s += 24;
+      if (knightWouldTakeLargestArmy(state, us)) {
+        s += 70;
+        if (totalVP(state, us) + 2 >= state.config.victoryPoints) s += 100;
+      }
       if (strongestOpponent && opponentIsDangerous(state, strongestOpponent.id)) s += 18;
       if (strongestOpponent) {
         const targetPressure = Math.max(...RESOURCES.map((r) => resourcePressure(state, strongestOpponent.id, r)));

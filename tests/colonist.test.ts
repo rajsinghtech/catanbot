@@ -5,7 +5,7 @@ import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
 import { newGame, legalActions, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
-import { heuristicScore, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
+import { forcedWin, heuristicScore, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
   return { ...parseLogLine(text, icons), ...extra };
@@ -275,6 +275,21 @@ test("near-win hidden hands make Monopoly target the opponent's strongest produc
   const best = choices.slice().sort((a, b) => heuristicScore(state, b) - heuristicScore(state, a))[0];
   assert.equal(visibleVP(state, opponent.id), 8);
   assert.equal(best.resource, expected);
+});
+
+test("a third knight that takes Largest Army is recognized as a forced win", () => {
+  const state = newGame({ playerCount: 4, victoryPoints: 10 }, { seed: 8, us: "red" });
+  const me = state.players[0];
+  me.cities = Object.keys(state.board.vertices).slice(0, 4);
+  me.knightsPlayed = 2;
+  me.devs.knight = 1;
+  state.players[1].knightsPlayed = 2;
+  state.phase = "roll";
+  state.current = me.id;
+  state.turn = 1;
+
+  const win = forcedWin(state);
+  assert.equal(win?.type, "PLAY_KNIGHT");
 });
 
 test("two-settlement funnel prefers a road route over spending the near-house hand on a dev card", () => {
