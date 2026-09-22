@@ -770,12 +770,12 @@ export function setupSecondSettlementScore(state: GameState, id: string, vertex:
         );
         score -= wheatOptionExists ? 108 : 35;
       } else {
-        // Sheep is the most common missing hinge in an otherwise attractive
+        // Sheep is the settlement hinge in an otherwise attractive
         // wheat/wood/brick/ore pair: without it, the third settlement and
-        // development-card routes depend on repeated player trades. Keep the
-        // diversity veto close to the wheat veto so raw pips cannot hide that
-        // tempo loss in 4-player openings.
-        score -= resource === "sheep" ? 94 : resource === "brick" ? 82 : 70;
+        // development-card routes depend on repeated player trades. Price it
+        // at least as heavily as ore because an ore-rich pair with no sheep
+        // can city, but cannot expand.
+        score -= resource === "sheep" ? 145 : resource === "brick" ? 82 : 70;
       }
     }
     if (starting[resource] > 0) score += 3;
@@ -793,7 +793,11 @@ export function setupSecondSettlementScore(state: GameState, id: string, vertex:
     const alignedOrePort = sim.board.vertices[vertex]?.port?.ratio === 2 &&
       sim.board.vertices[vertex]?.port?.resource === "ore" &&
       localPips(sim, vertex, "ore") > 0;
-    score -= alignedOrePort ? 24 : oreOptionExists ? 62 : 30;
+    // Ore is the city/dev conversion engine. A pair that completely misses
+    // it can still race settlements, but only when the remaining board has
+    // no viable ore corner. Keep a pretty wheat/wood/sheep second pick from
+    // erasing an available ore complement through raw pip count.
+    score -= alignedOrePort ? 24 : oreOptionExists ? 112 : 30;
   }
   score += covered.size * 5;
 
@@ -808,6 +812,10 @@ export function setupSecondSettlementScore(state: GameState, id: string, vertex:
   score += Math.min(8, starting.ore) * 1.25;
   score += (after.wood + after.brick + after.sheep) * 0.35;
   score += (after.wheat + after.ore) * 0.24;
+  const expansionCovered = (["wood", "brick", "sheep", "wheat"] as const)
+    .filter((resource) => after[resource] > 0).length;
+  score += expansionCovered * 9;
+  if (expansionCovered === 4) score += 35;
 
   const port = sim.board.vertices[vertex]?.port;
   if (port) {
@@ -916,8 +924,8 @@ export function settlementPairScore(state: GameState, action: Action): number {
       ["wood", 150],
       ["brick", 135],
       ["wheat", 125],
-      ["sheep", 95],
-      ["ore", 85],
+      ["sheep", 145],
+      ["ore", 112],
     ];
     for (const [resource, penalty] of penalties) {
       if (pairProduction[resource] <= 0 && available(resource)) score -= penalty;
@@ -927,7 +935,16 @@ export function settlementPairScore(state: GameState, action: Action): number {
       score -= 90;
     }
     const covered = (Object.keys(pairProduction) as Resource[]).filter((resource) => pairProduction[resource] > 0).length;
-    score += covered * 12;
+    // Diversity is a competitive tempo constraint, not a cosmetic tie-break:
+    // every missing build resource creates another trade/roll cycle. Reward a
+    // complete pair enough that a high-pip duplicate cannot hide the stall.
+    score += covered * 19;
+    if (pairProduction.ore > 0) score += 22;
+    if (pairProduction.wheat > 0) score += 18;
+    const expansionCovered = (["wood", "brick", "sheep", "wheat"] as const)
+      .filter((resource) => pairProduction[resource] > 0).length;
+    score += expansionCovered * 12;
+    if (expansionCovered === 4) score += 38;
   }
   return score;
 }
@@ -949,7 +966,12 @@ export function forcedWin(state: GameState): Action | null {
   for (const a of acts) {
     if (a.type === "BUILD_CITY" || a.type === "BUILD_SETTLEMENT") {
       const p = player(state, a.player);
-      const gain = a.type === "BUILD_CITY" ? 2 : 1;
+      // A city replaces a settlement, so it is a one-VP increase (2 VP on
+      // the city minus the settlement's existing 1 VP), not a two-VP swing.
+      // Treating it as +2 can fire this layer one turn too early and send the
+      // bot into a non-winning city while an award or second build was still
+      // required.
+      const gain = a.type === "BUILD_CITY" ? 1 : 1;
       if (totalVP(state, p.id) + gain >= state.config.victoryPoints) return a;
     }
     if (a.type === "BUILD_ROAD" && state.longestRoad !== a.player) {
@@ -972,7 +994,8 @@ export function forcedWin(state: GameState): Action | null {
 function oneTurnVpCeiling(state: GameState, id: string): number {
   const p = player(state, id);
   let ceiling = totalVP(state, id);
-  if (p.settlements.length > 0 && canPay(p.hand, COSTS.city)) ceiling = Math.max(ceiling, totalVP(state, id) + 2);
+  // Building a city upgrades an existing settlement: the net VP gain is one.
+  if (p.settlements.length > 0 && canPay(p.hand, COSTS.city)) ceiling = Math.max(ceiling, totalVP(state, id) + 1);
   if (
     p.settlements.length < 5 &&
     p.settlements.length + p.cities.length < 9 &&
@@ -1436,6 +1459,25 @@ export function heuristicScore(state: GameState, action: Action): number {
           if (unlock === "settlement") s += 26;
           else if (unlock === "road") s += 22;
           else if (unlock === "dev card") s -= 18;
+
+          // When the opening pair is stalled, an immediately payable dev card
+          // is not automatically the best conversion. If both road resources
+          // are currently empty and no house is reachable, keep the trade
+          // aimed at wood/brick so the next roll can restore the expansion
+          // lane. This fixes the recurring wheat -> ore -> dev loop that left
+          // the bot with cities but no legal third settlement.
+          const expansionResource = get !== "ore";
+          const roadBottleneck = me.hand.wood <= 0 && me.hand.brick <= 0 && bestReachableSettlementValue(state, us) <= 0;
+          if (roadBottleneck && !expansionResource) s -= 34;
+          if (roadBottleneck && (get === "wood" || get === "brick")) {
+            s += 24;
+            const otherRoad = get === "wood" ? "brick" : "wood";
+            const prod = production(state, us);
+            // Take the less-produced road card first; the board is more likely
+            // to supply the complementary card on the next roll.
+            s += Math.max(0, prod[otherRoad] - prod[get]) * 0.65;
+          }
+          if (get === "sheep" && me.hand.sheep < COSTS.settlement.sheep) s += 12;
         }
 
         // A trade is often the preparatory move for a settlement already
@@ -1501,6 +1543,8 @@ Colonist ranked 1v1 is 15 VP, discard 9, friendly robber; 4p is 10 VP, discard 7
 Never pick a move just because it is conventional. Prefer tempo, denial, and win-sequence over raw pips.
 Forced wins and opponent-win interruptions beat every other consideration.
 Opening setup: prefer a two-settlement pair with wheat and at least two expansion resources; do not choose a high-pip wheatless pair when a viable wheat corner exists.
+City upgrades a settlement for +1 net VP; a settlement is +1; Longest Road/Largest Army are +2 only when the award is actually secure.
+Roads are a means to an open, valuable settlement or a secure award/cut, not a default way to spend wood and brick. If the opening pair has no reachable house and both road cards are empty, trade toward wood/brick before buying a dev card for a merely convenient conversion.
 Endgame: when our win route needs two VP or fewer, take a legal city/settlement before a slower road, dev purchase, trade, or end turn unless the latter directly blocks an opponent's immediate win.`;
 
 export const TARGET_RULES = `Pick the target that matches the chosen operation.

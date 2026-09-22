@@ -112,7 +112,11 @@ function setupDoctrinePick(state: GameState, actions: Action[]): Action | null {
     // several player trades later.
     viable = firstExpansion;
   } else if (me.settlements.length > 0) {
-    const missingExpansion = expansion.filter((resource) => before[resource] <= 0);
+    // On the reverse-order pick, cover the full settlement cost shape. The
+    // old guard only looked for wood/brick, which allowed an ore-rich corner
+    // with no sheep to win on pips even though it could not expand.
+    const missingExpansion = (["wood", "brick", "sheep", "wheat"] as const)
+      .filter((resource) => before[resource] <= 0);
     const complement = settlements.filter((action) => missingExpansion.some((resource) => setupProduction(state, action, resource) > 0));
     if (missingExpansion.length && complement.length) viable = complement;
   }

@@ -292,6 +292,22 @@ test("a third knight that takes Largest Army is recognized as a forced win", () 
   assert.equal(win?.type, "PLAY_KNIGHT");
 });
 
+test("a city is only a one-VP forced-win increment", () => {
+  const state = newGame({ playerCount: 4, victoryPoints: 10 }, { seed: 8, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  me.settlements = vertices.slice(0, 2);
+  me.cities = vertices.slice(2, 5);
+  me.hand = { wood: 0, brick: 0, sheep: 0, wheat: 2, ore: 3 };
+  state.phase = "turn";
+  state.current = me.id;
+  state.turn = 1;
+  // 2 settlements + 3 cities = 8 VP. One city only reaches 9.
+  assert.equal(forcedWin(state), null);
+  me.devs.vp = 1;
+  assert.equal(forcedWin(state)?.type, "BUILD_CITY");
+});
+
 test("two-settlement funnel prefers a road route over spending the near-house hand on a dev card", () => {
   const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
   const me = state.players[0];
