@@ -1320,11 +1320,31 @@ async function main() {
         lastAt = 0;
       } else {
         // Keep one bounded retry for a packet lost during a Colonist card
-        // animation, then hold the same action id until the app projection
-        // changes. This prevents a stale recommendation from buying/trading
-        // repeatedly while still recovering a genuinely lost sender call.
+        // animation. If the projection still never changes, pass once rather
+        // than holding a stale optional action forever.
         const age = Date.now() - fireAndForgetPending.sentAt;
-        if (age < 4000 || fireAndForgetPending.attempts >= 1) continue;
+        if (fireAndForgetPending.attempts >= 1 && age >= 4000) {
+          // A sender can return normally while the app projection never
+          // changes (for example, a stale BUY_DEV menu after the deck or hand
+          // changed). Holding that action forever is worse than forfeiting an
+          // optional build: pass the turn once, then let the next
+          // authoritative projection choose a fresh action.
+          console.log("app-action-timeout", fireAndForgetPending.actionType);
+          fireAndForgetPending = null;
+          const fallback: Click = {
+            kind: "ui",
+            actionType: "END_TURN",
+            ui: "end_turn",
+            label: "End turn after app action timeout",
+            actionId: `END_TURN_TIMEOUT:${click.actionId}`,
+          };
+          const passed = await actuateWithRetry(fallback);
+          if (passed.ok) console.log("app-action-timeout-passed", click.actionType ?? click.ui);
+          last = click.actionId;
+          lastAt = Date.now();
+          continue;
+        }
+        if (age < 4000) continue;
         fireAndForgetPending.attempts += 1;
         fireAndForgetPending.sentAt = Date.now();
         last = "";
