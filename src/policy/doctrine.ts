@@ -721,10 +721,16 @@ export function setupSecondSettlementScore(state: GameState, id: string, vertex:
   return score;
 }
 
-function likelyComplementValue(state: GameState, action: Action): number {
-  if (state.phase !== "setup_settle" || !action.vertex) return 0;
+type SetupComplement = {
+  score: number;
+  vertex: string;
+  state: GameState;
+};
+
+function likelyComplement(state: GameState, action: Action): SetupComplement | null {
+  if (state.phase !== "setup_settle" || !action.vertex) return null;
   const me = player(state, action.player);
-  if (me.settlements.length > 0) return 0;
+  if (me.settlements.length > 0) return null;
 
   const sim = cloneState(state);
   const opening = legalActions(sim).find(
@@ -746,13 +752,19 @@ function likelyComplementValue(state: GameState, action: Action): number {
     }
     if (sim.phase !== "setup_settle") break;
     if (sim.current === action.player && player(sim, action.player).settlements.length >= 1) {
-      return Math.max(
-        0,
-        ...legalActions(sim)
-          .filter((candidate) => candidate.type === "PLACE_SETTLEMENT" && candidate.vertex)
-          .map((candidate) => setupSecondSettlementScore(sim, action.player, candidate.vertex!) +
-            settlementSpotValue(sim, action.player, candidate.vertex!) * 0.35),
-      );
+      const choices = legalActions(sim)
+        .filter((candidate) => candidate.type === "PLACE_SETTLEMENT" && candidate.vertex)
+        .map((candidate) => ({
+          candidate,
+          score: setupSecondSettlementScore(sim, action.player, candidate.vertex!) +
+            settlementSpotValue(sim, action.player, candidate.vertex!) * 0.35,
+        }))
+        .sort((a, b) => b.score - a.score);
+      const best = choices[0];
+      if (!best?.candidate.vertex) return null;
+      const pair = cloneState(sim);
+      placeForEstimate(pair, action.player, best.candidate.vertex);
+      return { score: Math.max(0, best.score), vertex: best.candidate.vertex, state: pair };
     }
     const opponentPick = legalActions(sim)
       .filter((candidate) => candidate.type === "PLACE_SETTLEMENT" && candidate.vertex)
@@ -760,15 +772,50 @@ function likelyComplementValue(state: GameState, action: Action): number {
     if (!opponentPick) break;
     applyAction(sim, opponentPick, () => 0.5);
   }
-  return 0;
+  return null;
+}
+
+function likelyComplementValue(state: GameState, action: Action): number {
+  return likelyComplement(state, action)?.score ?? 0;
 }
 
 export function settlementPairScore(state: GameState, action: Action): number {
   if (state.phase !== "setup_settle" || !action.vertex) return 0;
   const current = settlementSpotValue(state, action.player, action.vertex);
-  const complement = likelyComplementValue(state, action);
+  const complement = likelyComplement(state, action);
   const denial = opponentDenial(state, action.player, action.vertex);
-  return current + complement * 0.9 + denial * 2.2;
+  let score = current + (complement?.score ?? 0) * 0.9 + denial * 2.2;
+
+  // The first house is not a standalone pip-maximization problem.  A pair
+  // with no wood or brick production can be trapped for many turns even when
+  // its raw numbers look excellent; it cannot expand without repeated trades
+  // and usually loses the race to the third settlement.  Penalize that only
+  // when the remaining open board still offers the missing resource, so a
+  // genuinely resource-poor board does not make the opening impossible.
+  if (complement) {
+    const pairPlayer = player(complement.state, action.player);
+    const available = (resource: Resource) => settlementSpots(complement.state, pairPlayer, true).some(
+      (spot) => localPips(complement.state, spot, resource) > 0,
+    );
+    const pairProduction = production(complement.state, action.player);
+    const penalties: Array<[Resource, number]> = [
+      ["wood", 150],
+      ["brick", 135],
+      ["wheat", 125],
+      ["sheep", 95],
+      ["ore", 85],
+    ];
+    for (const [resource, penalty] of penalties) {
+      if (pairProduction[resource] <= 0 && available(resource)) score -= penalty;
+      else if (pairProduction[resource] < 2 && available(resource)) score -= penalty * 0.18;
+    }
+    if (pairProduction.wood <= 0 && pairProduction.brick <= 0 && (available("wood") || available("brick"))) {
+      score -= 90;
+    }
+    const covered = (Object.keys(pairProduction) as Resource[]).filter((resource) => pairProduction[resource] > 0).length;
+    score += covered * 12;
+  }
+  return score;
 }
 
 export const setupSettlementPairScore = settlementPairScore;

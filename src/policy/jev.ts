@@ -353,11 +353,12 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
   const plan = longestRoadPlanScore(state, action);
   if ((plan.claimNow && plan.secureNow) || plan.defendNow) return true;
   if (plan.claimSoon && plan.secureSoon && (plan.roadsToGoal ?? 99) <= 2) return true;
-  // A fresh frontier can justify the first few roads, but a mature network
-  // must prove an actual award swing or settlement route before consuming
-  // another wood/brick pair.
+  // A fresh frontier can justify the first few roads, but once three paid
+  // roads are down the network must prove an actual award swing or immediate
+  // settlement route before consuming another wood/brick pair. This keeps a
+  // pretty but unsecured Longest Road chase from starving the VP engine.
   const me = state.players.find((p) => p.id === action.player);
-  if ((me?.roads.length ?? 0) >= 4) return false;
+  if ((me?.roads.length ?? 0) >= 3) return false;
   return roadExpansionScore(state, action) >= 52;
 }
 
