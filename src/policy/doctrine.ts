@@ -1028,11 +1028,19 @@ function opponentIsDangerous(state: GameState, id: string): boolean {
   const potentialArmyAward = state.largestArmy === id ? 0 : p.knightsPlayed >= 2 ? 2 : 0;
   if (visible + potentialRoadAward + potentialArmyAward >= target - 1) return true;
   if (visible >= target - 3) return true;
-  return visible >= target - 4 && (
+  // In a four-player game the public board can hide a development VP, and an
+  // award holder can be one turn from the win without looking like the raw
+  // settlement/city leader. Treat a developed award threat as dangerous one
+  // point earlier so the robber and road-cut branches start denying before
+  // the final turn. This is intentionally structure-gated: it does not make
+  // every player at 6 VP a target.
+  if (visible >= target - 4 && (
     roadLength(state, id) >= 4 ||
+    p.knightsPlayed >= 2 ||
     p.settlements.length >= 4 ||
     p.cities.length >= 2
-  );
+  )) return true;
+  return roadLength(state, id) >= 6 || p.knightsPlayed >= 3;
 }
 
 /**
