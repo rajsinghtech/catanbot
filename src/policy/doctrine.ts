@@ -1537,6 +1537,27 @@ export function heuristicScore(state: GameState, action: Action): number {
             s += Math.max(0, prod[otherRoad] - prod[get]) * 0.65;
           }
           if (get === "sheep" && me.hand.sheep < COSTS.settlement.sheep) s += 12;
+
+          // A reachable settlement is still the goal even when the road is
+          // already in place. In that state the useful bank card is whichever
+          // missing settlement resource is most likely to arrive next; ore is
+          // not interchangeable with wood/brick/sheep/wheat just because it
+          // makes a city-shaped hand. The previous rule only protected the
+          // no-reachable-house case, which let 4 ore -> wheat/ore trades keep
+          // the bot in a two-house stall.
+          const expansionPressure = me.settlements.length < 5 &&
+            (me.settlements.length >= 2 || me.cities.length === 0) &&
+            settlementSpots(state, me, false).length > 0;
+          if (expansionPressure) {
+            if (get !== "ore" && me.hand[get] < COSTS.settlement[get]) {
+              s += get === "wood" || get === "brick" ? 18 : 14;
+            }
+            if (get === "ore" && !canPay(after, COSTS.city)) s -= 20;
+            if (get === "wood" || get === "brick") {
+              if (me.hand.wood <= 0 && me.hand.brick <= 0) s += 18;
+              else if (me.hand[get] <= 0) s += 8;
+            }
+          }
         }
 
         // A trade is often the preparatory move for a settlement already
@@ -1589,6 +1610,9 @@ export function heuristicScore(state: GameState, action: Action): number {
       s += 5;
       const nearWinExpansion = me.settlements.length === 0 && totalVP(state, us) >= state.config.victoryPoints - 1;
       const preserveLastExpansion = me.settlements.length <= 1 && me.cities.length > 0 && settlementSpots(state, me, true).length > 0;
+      const preserveOpeningExpansion = funnel.active &&
+        me.settlements.length < 5 &&
+        settlementSpots(state, me, true).length > 0;
       for (const r of RESOURCES) {
         const n = d[r] ?? 0;
         if (nearWinExpansion || preserveLastExpansion) {
@@ -1601,6 +1625,15 @@ export function heuristicScore(state: GameState, action: Action): number {
           if (r === "ore") s += n * 5;
           else if (r === "wheat") s -= n * 6;
           else s -= n * 8;
+        } else if (preserveOpeningExpansion) {
+          // During the two-building funnel, preserve the four cards that can
+          // make the next settlement. Discard ore duplicates first; dumping
+          // brick/sheep/wood here creates the exact dead position where the
+          // bot can only buy devs or trade in circles.
+          if (r === "ore") s += n * 7;
+          else if (r === "wheat") s -= n * 5;
+          else if (r === "sheep") s -= n * 7;
+          else s -= n * 9;
         } else if (r === "wheat" || r === "ore") s -= n * 3;
         else s -= n;
       }

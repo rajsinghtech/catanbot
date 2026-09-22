@@ -482,6 +482,52 @@ test("the expansion funnel trades toward a road instead of a dev-card unlock", (
   assert.ok(heuristicScore(state, oreToBrick) > heuristicScore(state, oreToSheep));
 });
 
+test("a one-card house route beats buying a development card in the opening funnel", () => {
+  const state = newGame({ playerCount: 2 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  const first = vertices[0];
+  const second = vertices.find((vertex) => vertex !== first && !state.board.vertices[first].edges.some((edge) =>
+    state.board.edges[edge].vertices.includes(vertex),
+  ));
+  assert.ok(second);
+  me.settlements = [first, second];
+  me.roads = [state.board.vertices[first].edges[0]];
+  me.hand = { wood: 1, brick: 0, sheep: 1, wheat: 4, ore: 1 };
+  state.phase = "turn";
+  state.current = me.id;
+  state.turn = 1;
+
+  const trade = legalActions(state).find((action) =>
+    action.type === "MARITIME_TRADE" && action.give === "wheat" && action.get === "brick",
+  );
+  const buyDev = legalActions(state).find((action) => action.type === "BUY_DEV");
+  assert.ok(trade);
+  assert.ok(buyDev);
+  assert.ok(heuristicScore(state, trade) > heuristicScore(state, buyDev));
+});
+
+test("opening-funnel discard enumeration keeps the expansion hand and drops ore duplicates", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const vertices = Object.keys(state.board.vertices);
+  me.settlements = [vertices[0], vertices[10]];
+  me.roads = [Object.keys(state.board.edges)[0]];
+  me.hand = { wood: 1, brick: 2, sheep: 1, wheat: 2, ore: 3 };
+  state.phase = "discard";
+  state.current = me.id;
+  state.mustDiscard[me.id] = 4;
+
+  const discards = legalActions(state).filter((action) => action.type === "DISCARD");
+  const best = discards.slice().sort((a, b) => heuristicScore(state, b) - heuristicScore(state, a))[0];
+  assert.ok(best);
+  assert.equal(best.discard?.wood ?? 0, 0);
+  assert.equal(best.discard?.brick ?? 0, 0);
+  assert.equal(best.discard?.sheep ?? 0, 0);
+  assert.equal(best.discard?.wheat ?? 0, 1);
+  assert.equal(best.discard?.ore, 3);
+});
+
 test("won the game log sets the Colonist winner", () => {
   const state = newGame({ playerCount: 4 }, { seed: 4, names: ["Izak", "Lise", "Zuzana", "Ru"], us: "red" });
   applyLogEvent(state, parseLogLine("Izak won the game"));

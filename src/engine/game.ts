@@ -881,7 +881,7 @@ function collectDiscards(p: Player, need: number, acts: Action[]): void {
       acc.push(cards[i]);
       rec(i + 1, left - 1, acc);
       acc.pop();
-      if (seen.size > 24) return;
+      if (seen.size > 256) return;
     }
   };
   rec(0, need, []);
