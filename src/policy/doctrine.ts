@@ -907,6 +907,7 @@ export function heuristicScore(state: GameState, action: Action): number {
   const oppVp = Math.max(0, ...opp.map((p) => totalVP(state, p.id)));
   const myVp = totalVP(state, us);
   const endgame = myVp >= state.config.victoryPoints - 4 || oppVp >= state.config.victoryPoints - 4;
+  const opponentNearWin = opp.some((p) => visibleVP(state, p.id) >= state.config.victoryPoints - 2);
 
   // Add a direct win-sequence defense layer before operation-specific
   // heuristics.  A good self-build is still secondary when a settlement,
@@ -1066,17 +1067,25 @@ export function heuristicScore(state: GameState, action: Action): number {
           for (const pl of state.players) {
             const n = pl.cities.includes(vid) ? 2 : pl.settlements.includes(vid) ? 1 : 0;
             if (!n) continue;
-            if (pl.id === us) ours += n * pips;
+              if (pl.id === us) ours += n * pips;
             else {
               const pressure = res ? resourcePressure(state, pl.id, res) : 0;
               theirs += n * pips * (res === "wheat" || res === "ore" ? 1.4 : 1) * (1 + pressure * 0.42);
               if (pressure >= 1.5) s += n * 4;
+              // A hidden hand is not evidence that a visible 8/10-point
+              // opponent has nothing. When the robber can interrupt that
+              // opponent's productive tile, denial is worth more than the
+              // ordinary pip/steal estimate.
+              if (visibleVP(state, pl.id) >= state.config.victoryPoints - 2) {
+                theirs += n * pips * 3;
+                s += n * 10;
+              }
             }
           }
         }
         s += theirs * 4 - ours * 5;
       }
-      if (action.stealFrom) s += 6;
+      if (action.stealFrom) s += opponentNearWin ? 22 : 6;
       break;
     }
     case "PLAY_MONOPOLY":
@@ -1084,6 +1093,19 @@ export function heuristicScore(state: GameState, action: Action): number {
       if (action.resource) {
         const held = opp.reduce((n, o) => n + o.hand[action.resource as Resource], 0);
         s += held * 8;
+        // Opponent resource identities are usually hidden in live Colonist
+        // state. Production and unknown-hand size are the best available
+        // estimate of what a Monopoly can actually take, especially when a
+        // public near-win makes tempo denial more important than another
+        // passive build turn.
+        const resource = action.resource as Resource;
+        const productionThreat = opp.reduce(
+          (n, o) => n + production(state, o.id)[resource] * (visibleVP(state, o.id) >= state.config.victoryPoints - 2 ? 2 : 1),
+          0,
+        );
+        s += productionThreat * (opponentNearWin ? 2.5 : 1.2);
+        s += Math.min(20, opp.reduce((n, o) => n + o.hidden.unknown, 0) * (opponentNearWin ? 1.5 : 0.5));
+        if (opponentNearWin) s += 45;
       }
       break;
     case "PLAY_ROAD_BUILDING":

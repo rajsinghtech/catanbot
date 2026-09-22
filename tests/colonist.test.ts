@@ -4,6 +4,7 @@ import { applyLogEvent } from "../src/colonist/apply.ts";
 import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
 import { newGame, legalActions, totalVP, visibleVP } from "../src/engine/game.ts";
+import { production } from "../src/engine/features.ts";
 import { heuristicScore, settlementPairScore } from "../src/policy/doctrine.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
@@ -225,6 +226,31 @@ test("setup settlement scoring values the pair and denial, not only raw pips", (
   assert.ok(bestHeuristic.action.vertex);
   const label = bestHeuristic.action.label.toLowerCase();
   assert.match(label, /wheat|ore/);
+});
+
+test("near-win hidden hands make Monopoly target the opponent's strongest production", () => {
+  const state = newGame({ playerCount: 4, victoryPoints: 10 }, { seed: 8, us: "red" });
+  state.phase = "roll";
+  state.current = "red";
+  state.turn = 1;
+  state.players[0].devs.monopoly = 1;
+  const opponent = state.players[1];
+  const vertices = Object.keys(state.board.vertices);
+  opponent.settlements = vertices.slice(0, 8);
+  opponent.hand = { wood: 0, brick: 0, sheep: 0, wheat: 0, ore: 0 };
+  opponent.hidden.unknown = 8;
+  const productionByResource = {
+    wood: production(state, opponent.id).wood,
+    brick: production(state, opponent.id).brick,
+    sheep: production(state, opponent.id).sheep,
+    wheat: production(state, opponent.id).wheat,
+    ore: production(state, opponent.id).ore,
+  };
+  const expected = Object.entries(productionByResource).sort((a, b) => b[1] - a[1])[0][0];
+  const choices = legalActions(state).filter((action) => action.type === "PLAY_MONOPOLY");
+  const best = choices.slice().sort((a, b) => heuristicScore(state, b) - heuristicScore(state, a))[0];
+  assert.equal(visibleVP(state, opponent.id), 8);
+  assert.equal(best.resource, expected);
 });
 
 test("won the game log sets the Colonist winner", () => {
