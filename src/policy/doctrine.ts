@@ -922,6 +922,24 @@ export interface LongestRoadPlan {
 
 type RoadPlanNode = { state: GameState; path: string[] };
 
+function opponentRoadLengthAfterOneRoadUncached(state: GameState, id: string): number {
+  const opponent = player(state, id);
+  let best = roadLength(state, id);
+  for (const edge of roadSpots(state, opponent)) {
+    const next = cloneState(state);
+    const nextOpponent = player(next, id);
+    if (nextOpponent.roads.includes(edge)) continue;
+    nextOpponent.roads.push(edge);
+    best = Math.max(best, roadLength(next, id));
+  }
+  return best;
+}
+
+function opponentRoadLengthAfterOneRoad(state: GameState, id: string): number {
+  return doctrineMemo(state, `opponent-road-next:${id}`, () =>
+    opponentRoadLengthAfterOneRoadUncached(state, id));
+}
+
 function addRoadForPlan(state: GameState, us: string, edge: string, pay: boolean): GameState {
   const next = cloneState(state);
   const p = player(next, us);
@@ -960,6 +978,12 @@ export function longestRoadPlanScore(state: GameState, action: Action): LongestR
     0,
     ...state.players.filter((p) => p.id !== us).map((p) => roadLength(state, p.id)),
   );
+  const opponentNextLength = Math.max(
+    0,
+    ...state.players
+      .filter((p) => p.id !== us)
+      .map((p) => opponentRoadLengthAfterOneRoad(state, p.id)),
+  );
   const beforeLength = roadLength(state, us);
   const noPlan: LongestRoadPlan = {
     immediateLength: beforeLength,
@@ -991,17 +1015,17 @@ export function longestRoadPlanScore(state: GameState, action: Action): LongestR
 
   const needsImmediateSecurity =
     (state.longestRoad !== us && immediateLength >= target) ||
-    (state.longestRoad === us && opponentLength >= beforeLength && immediateLength > beforeLength);
+    (state.longestRoad === us && opponentNextLength >= beforeLength && immediateLength > beforeLength);
   const immediateSecurity = needsImmediateSecurity
     ? roadSecurity(first, us, immediateLength)
     : { blockers: 0, maxDrop: 0, worstLength: immediateLength };
-  const secureNow = immediateLength >= target && immediateSecurity.worstLength > opponentLength;
+  const secureNow = immediateLength >= target && immediateSecurity.worstLength > opponentNextLength;
   const claimNow = state.longestRoad !== us && immediateLength >= target;
   const defendNow =
     state.longestRoad === us &&
-    opponentLength >= beforeLength &&
+    opponentNextLength >= beforeLength &&
     immediateLength > beforeLength &&
-    immediateSecurity.worstLength > opponentLength;
+    immediateSecurity.worstLength > opponentNextLength;
 
   const nodes: RoadPlanNode[] = [{ state: first, path: [action.edge] }];
   let frontier = nodes.slice();
@@ -1039,7 +1063,11 @@ export function longestRoadPlanScore(state: GameState, action: Action): LongestR
     }
   }
   const claimSoon = goalPath !== null;
-  const secureSoon = claimSoon && goalSecurity.worstLength > opponentLength;
+  // A future award is only secure if the current rival cannot add one legal
+  // road before our bounded route completes. The old check compared against
+  // the rival's present length only, which incorrectly called a three-edge
+  // race "secure" while the rival could simply extend from 4 to 5.
+  const secureSoon = claimSoon && goalSecurity.worstLength > opponentNextLength;
   const roadsToGoal = goalPath ? goalPath.length : null;
 
   let value = 0;

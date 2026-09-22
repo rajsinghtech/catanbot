@@ -695,7 +695,7 @@ test("Longest Road planner values a bridge between two short road islands", () =
   assert.ok(heuristicScore(state, bridge) > heuristicScore(state, endTurn));
 });
 
-test("a bounded secure Longest Road race can start before a house is payable", () => {
+test("an unsecured Longest Road race does not justify a road before a house is payable", () => {
   const state = newGame({ playerCount: 4 }, { seed: 1, us: "red" });
   const me = state.players[0];
   const opponent = state.players[1];
@@ -725,10 +725,13 @@ test("a bounded secure Longest Road race can start before a house is payable", (
   assert.equal(plan.claimNow, false);
   assert.equal(plan.secureNow, false);
   assert.equal(plan.claimSoon, true);
-  assert.equal(plan.secureSoon, true);
+  // The rival is four roads long but can extend to five immediately. A
+  // three-edge route that only beats the rival's current length is not a
+  // secure investment.
+  assert.equal(plan.secureSoon, false);
   assert.equal(plan.roadsToGoal, 3);
-  assert.equal(boundedSecureLongestRoadRace(state, road, plan), true);
-  assert.ok(heuristicScore(state, road) > heuristicScore(state, endTurn));
+  assert.equal(boundedSecureLongestRoadRace(state, road, plan), false);
+  assert.ok(heuristicScore(state, road) < heuristicScore(state, endTurn));
 });
 
 test("a bounded open settlement route can justify an approach road with one spare road card", () => {
