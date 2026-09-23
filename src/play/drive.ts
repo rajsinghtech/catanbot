@@ -448,6 +448,44 @@ async function main() {
     tradeResponse?: number | null;
   };
 
+  // Colonist's webpack module ids change between deployments. Resolve the
+  // game-manager singleton from the current bundle instead of relying on one
+  // stale numeric id; cache the discovered module id in this page afterward.
+  const COLONIST_MANAGER_LOOKUP = `(() => {
+    const req = window.__catanbotWebpackRequire;
+    if (typeof req !== "function") return null;
+    const find = (id) => {
+      try {
+        const exports = req(id);
+        const values = [exports?.IH, exports?.default, ...(exports && typeof exports === "object" ? Object.values(exports) : [])];
+        return values.find((value) => value && typeof value === "object" && value.gameController && value.socketGameSend) || null;
+      } catch {
+        return null;
+      }
+    };
+    const cached = window.__catanbotManagerModuleId;
+    if (cached != null) {
+      const manager = find(cached);
+      if (manager) return manager;
+    }
+    for (const id of [47570, 67210]) {
+      const manager = find(id);
+      if (manager) {
+        window.__catanbotManagerModuleId = id;
+        return manager;
+      }
+    }
+    for (const [id, factory] of Object.entries(req.m || {})) {
+      if (!String(factory).includes("socketGameSend")) continue;
+      const manager = find(id);
+      if (manager) {
+        window.__catanbotManagerModuleId = Number(id);
+        return manager;
+      }
+    }
+    return null;
+  })()`;
+
   /**
    * Use Colonist's own loaded game manager for board actions. The canvas is a
    * rendered view, not the protocol's coordinate system: its viewport can be
@@ -495,7 +533,7 @@ async function main() {
       if (typeof req !== "function") return { ok: false, reason: "Colonist webpack require unavailable" };
       let manager;
       try {
-        manager = req(47570)?.IH;
+        manager = ${COLONIST_MANAGER_LOOKUP};
       } catch (error) {
         return { ok: false, reason: "Colonist game manager unavailable: " + String(error) };
       }
@@ -752,7 +790,7 @@ async function main() {
           chunks.push([[Date.now()], {}, (runtime) => { req = runtime; }]);
           if (typeof req === "function") window.__catanbotWebpackRequire = req;
         }
-        const manager = typeof req === "function" ? req(47570)?.IH : null;
+        const manager = typeof req === "function" ? ${COLONIST_MANAGER_LOOKUP} : null;
         if (!manager?.gameController) return null;
         const myColor = manager.gameController.myColor;
         const current = manager.gameController.currentState || {};
@@ -877,7 +915,7 @@ async function main() {
           if (typeof req === "function") window.__catanbotWebpackRequire = req;
         }
         if (typeof req !== "function") return null;
-        const manager = req(47570)?.IH;
+        const manager = ${COLONIST_MANAGER_LOOKUP};
         const tileState = manager?.gameState?.mapState?.tileState;
         if (!manager || !tileState) return null;
         const devPlayers = manager.gameController?.stateController?.state
@@ -970,7 +1008,7 @@ async function main() {
           chunks.push([[Date.now()], {}, (runtime) => { req = runtime; }]);
           if (typeof req === "function") window.__catanbotWebpackRequire = req;
         }
-        const manager = typeof req === "function" ? req(47570)?.IH : null;
+        const manager = typeof req === "function" ? ${COLONIST_MANAGER_LOOKUP} : null;
         if (!manager?.gameController) return null;
         const tradeState = manager.gameStore?.getState?.()?.gameState?.tradeState;
         return {
@@ -1315,7 +1353,11 @@ async function main() {
       // Colonist fills the match hash asynchronously after Start Game. At
       // higher polling rates this branch can run before the first app-state
       // projection arrives; give that new game time to establish itself.
-      if (Date.now() - t0 < 15000 || snap.colonistBoard) continue;
+      // Do not trust snap.colonistBoard here: it is a cached bridge projection
+      // and remains true after Colonist disconnects back to the lobby. Once
+      // the startup grace period expires, a missing match URL means this game
+      // is gone and the outer loop should launch a fresh one.
+      if (Date.now() - t0 < 15000) continue;
       console.log("left match", href);
       break;
     }
