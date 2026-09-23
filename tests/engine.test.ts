@@ -286,6 +286,44 @@ test("second setup house prefers completing a missing core resource", () => {
   assert.ok(bestCompleting > bestRepeating);
 });
 
+test("second setup house secures wheat when an open wheat corner remains", async () => {
+  const previousOffline = process.env.JEV_OFFLINE;
+  process.env.JEV_OFFLINE = "1";
+  try {
+    const g = newGame({ playerCount: 4 }, { seed: 1, us: "red" });
+    const terrainAt = (vertex: string, terrain: string) =>
+      g.board.vertices[vertex]?.hexes.some((hex) => g.board.hexes[hex]?.terrain === terrain) ?? false;
+    const first = legalActions(g).find((action) =>
+      action.type === "PLACE_SETTLEMENT" && action.vertex &&
+      !terrainAt(action.vertex, "wheat") &&
+      (terrainAt(action.vertex, "wood") || terrainAt(action.vertex, "brick")),
+    );
+    assert.ok(first?.vertex);
+
+    const me = g.players[0];
+    me.settlements = [first.vertex];
+    g.current = me.id;
+    g.phase = "setup_settle";
+    g.setupForward = false;
+    const candidates = legalActions(g).filter((action) => action.type === "PLACE_SETTLEMENT" && action.vertex);
+    const wheat = candidates.filter((action) => terrainAt(action.vertex!, "wheat"));
+    assert.ok(wheat.length > 0, "fixture should leave legal wheat corners available");
+
+    const wheatAndExpansion = wheat.filter((action) =>
+      terrainAt(action.vertex!, "wood") || terrainAt(action.vertex!, "brick"),
+    );
+    const rec = await decide(g);
+    assert.equal(rec.action.type, "PLACE_SETTLEMENT");
+    assert.ok(terrainAt(rec.action.vertex!, "wheat"), "do not give away all wheat production for a wood/brick-only corner");
+    if (wheatAndExpansion.length) {
+      assert.ok(wheatAndExpansion.some((action) => action.vertex === rec.action.vertex));
+    }
+  } finally {
+    if (previousOffline === undefined) delete process.env.JEV_OFFLINE;
+    else process.env.JEV_OFFLINE = previousOffline;
+  }
+});
+
 test("longest road requires 5 connected roads", () => {
   const g = newGame({ playerCount: 2 }, { seed: 2 });
   assert.equal(roadLength(g, "red"), 0);

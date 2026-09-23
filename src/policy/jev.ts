@@ -1,7 +1,8 @@
-import { COSTS, type Action, type GameState, type Recommendation } from "../types.ts";
+import { COSTS, PIP, type Action, type GameState, type Recommendation, type Resource } from "../types.ts";
 import { compactState, opponentThreat, winRoute } from "../engine/features.ts";
 import { applyAction, cloneState, legalActions, totalVP } from "../engine/game.ts";
 import { production } from "../engine/features.ts";
+import { resourceOf } from "../engine/map.ts";
 import {
   forcedWin,
   boundedSecureLongestRoadRace,
@@ -15,6 +16,7 @@ import {
   roadOpenSettlementTarget,
   roadReservesExpansionLane,
   roadMaterialsSupportedAfterAction,
+  prioritizeWheatSetupChoices,
   settlementPairScore,
   settlementResourcesSupportedAfterAction,
   settlementRouteAfterRoad,
@@ -93,15 +95,18 @@ function gatewayCoolingDown(): boolean {
   return Date.now() < gatewayCooldownUntil;
 }
 
-function setupProduction(state: GameState, action: Action, resource: keyof ReturnType<typeof production>): number {
+function setupProduction(state: GameState, action: Action, resource: Resource): number {
   if (state.phase !== "setup_settle" || action.type !== "PLACE_SETTLEMENT" || !action.vertex) return 0;
-  try {
-    const after = cloneState(state);
-    applyAction(after, action, () => 0.5);
-    return production(after, action.player)[resource];
-  } catch {
-    return 0;
-  }
+  const vertex = state.board.vertices[action.vertex];
+  if (!vertex) return production(state, action.player)[resource];
+  const existing = production(state, action.player)[resource];
+  const added = vertex.hexes.reduce((sum, hexId) => {
+    const hex = state.board.hexes[hexId];
+    return hex && hex.id !== state.robberHex && resourceOf(hex) === resource && hex.number != null
+      ? sum + (PIP[hex.number] ?? 0)
+      : sum;
+  }, 0);
+  return existing + added;
 }
 
 function setupWheatProduction(state: GameState, action: Action): number {
@@ -125,13 +130,18 @@ function setupDoctrinePick(state: GameState, actions: Action[]): Action | null {
     // several player trades later.
     viable = firstExpansion;
   } else if (me.settlements.length > 0) {
-    // On the reverse-order pick, cover the full settlement cost shape. The
-    // old guard only looked for wood/brick, which allowed an ore-rich corner
-    // with no sheep to win on pips even though it could not expand.
-    const missingExpansion = (["wood", "brick", "sheep", "wheat"] as const)
-      .filter((resource) => before[resource] <= 0);
-    const complement = settlements.filter((action) => missingExpansion.some((resource) => setupProduction(state, action, resource) > 0));
-    if (missingExpansion.length && complement.length) viable = complement;
+    const wheatPrioritized = prioritizeWheatSetupChoices(state, settlements);
+    if (wheatPrioritized !== settlements) {
+      viable = wheatPrioritized;
+    } else {
+      // On the reverse-order pick, cover the full settlement cost shape. The
+      // old guard only looked for wood/brick, which allowed an ore-rich corner
+      // with no sheep to win on pips even though it could not expand.
+      const missingExpansion = (["wood", "brick", "sheep", "wheat"] as const)
+        .filter((resource) => before[resource] <= 0);
+      const complement = settlements.filter((action) => missingExpansion.some((resource) => setupProduction(state, action, resource) > 0));
+      if (missingExpansion.length && complement.length) viable = complement;
+    }
   }
   return viable
     .map((action) => ({

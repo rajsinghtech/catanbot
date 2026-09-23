@@ -16,6 +16,7 @@ import { resourceOf } from "../engine/map.ts";
 
 type DoctrineMemo = {
   signature: string;
+  board: GameState["board"];
   values: Map<string, unknown>;
 };
 
@@ -26,8 +27,24 @@ function doctrineStateSignature(state: GameState): string {
     state.phase,
     state.current,
     state.turn,
+    state.roller,
+    state.afterRobber,
+    state.dice?.join(":") ?? "",
     state.robberHex,
-    state.pendingOffer?.id ?? "",
+    state.setupIndex,
+    state.setupForward,
+    state.pendingRoads,
+    state.longestRoad ?? "",
+    state.largestArmy ?? "",
+    state.winner ?? "",
+    state.config.victoryPoints,
+    state.config.discardLimit,
+    state.deck.length,
+    JSON.stringify(state.mustDiscard),
+    state.stealFrom.join(":"),
+    RESOURCES.map((resource) => state.bank[resource]).join(":"),
+    JSON.stringify(state.pendingOffer ?? null),
+    JSON.stringify(state.pendingYop ?? null),
     ...state.players.map((p) => [
       p.id,
       p.hand.wood,
@@ -39,6 +56,14 @@ function doctrineStateSignature(state: GameState): string {
       p.cities.join(","),
       p.roads.join(","),
       p.knightsPlayed,
+      Object.values(p.devs).join(":"),
+      Object.values(p.newDevs).join(":"),
+      p.hidden.unknown,
+      RESOURCES.map((resource) => p.hidden.known[resource]).join(":"),
+      p.unplaced.settlements,
+      p.unplaced.cities,
+      p.unplaced.roads,
+      p.playedDevThisTurn,
     ].join(":")),
   ].join("|");
 }
@@ -46,8 +71,8 @@ function doctrineStateSignature(state: GameState): string {
 function doctrineMemo<T>(state: GameState, key: string, compute: () => T): T {
   const signature = doctrineStateSignature(state);
   let memo = doctrineMemos.get(state);
-  if (!memo || memo.signature !== signature) {
-    memo = { signature, values: new Map() };
+  if (!memo || memo.signature !== signature || memo.board !== state.board) {
+    memo = { signature, board: state.board, values: new Map() };
     doctrineMemos.set(state, memo);
   }
   if (memo.values.has(key)) return memo.values.get(key) as T;
@@ -1642,7 +1667,7 @@ function opponentDenial(state: GameState, us: string, vertex: string): number {
  * Score the pair's combined coverage and its actual starting cards before
  * allowing raw production to break the tie.
  */
-export function setupSecondSettlementScore(state: GameState, id: string, vertex: string): number {
+function setupSecondSettlementScoreUncached(state: GameState, id: string, vertex: string): number {
   const me = player(state, id);
   if (me.settlements.length === 0) return 0;
   const before = production(state, id);
@@ -1793,6 +1818,26 @@ export function setupSecondSettlementScore(state: GameState, id: string, vertex:
   return score;
 }
 
+export function setupSecondSettlementScore(state: GameState, id: string, vertex: string): number {
+  return doctrineMemo(state, `setup-second:${id}:${vertex}`, () =>
+    setupSecondSettlementScoreUncached(state, id, vertex));
+}
+
+/** Keep the executed second house and first-house pair forecast on the same
+ * wheat-first candidate set. Otherwise the opening planner can predict a
+ * wheat complement that the actual reverse-order picker later discards. */
+export function prioritizeWheatSetupChoices(state: GameState, actions: Action[]): Action[] {
+  if (state.phase !== "setup_settle") return actions;
+  const me = player(state, state.current);
+  if (!me.settlements.length || production(state, me.id).wheat > 0) return actions;
+  const wheat = actions.filter((action) => action.vertex && localPips(state, action.vertex, "wheat") > 0);
+  if (!wheat.length) return actions;
+  const wheatWithRoadResource = wheat.filter((action) =>
+    localPips(state, action.vertex!, "wood") > 0 || localPips(state, action.vertex!, "brick") > 0,
+  );
+  return wheatWithRoadResource.length ? wheatWithRoadResource : wheat;
+}
+
 type SetupComplement = {
   score: number;
   vertex: string;
@@ -1824,8 +1869,9 @@ function likelyComplement(state: GameState, action: Action): SetupComplement | n
     }
     if (sim.phase !== "setup_settle") break;
     if (sim.current === action.player && player(sim, action.player).settlements.length >= 1) {
-      const choices = legalActions(sim)
-        .filter((candidate) => candidate.type === "PLACE_SETTLEMENT" && candidate.vertex)
+      const candidates = legalActions(sim)
+        .filter((candidate) => candidate.type === "PLACE_SETTLEMENT" && candidate.vertex);
+      const choices = prioritizeWheatSetupChoices(sim, candidates)
         .map((candidate) => ({
           candidate,
           score: setupSecondSettlementScore(sim, action.player, candidate.vertex!) +
@@ -1851,7 +1897,7 @@ function likelyComplementValue(state: GameState, action: Action): number {
   return likelyComplement(state, action)?.score ?? 0;
 }
 
-export function settlementPairScore(state: GameState, action: Action): number {
+function settlementPairScoreUncached(state: GameState, action: Action): number {
   if (state.phase !== "setup_settle" || !action.vertex) return 0;
   const current = settlementSpotValue(state, action.player, action.vertex);
   const complement = likelyComplement(state, action);
@@ -1948,6 +1994,11 @@ export function settlementPairScore(state: GameState, action: Action): number {
     }
   }
   return score;
+}
+
+export function settlementPairScore(state: GameState, action: Action): number {
+  return doctrineMemo(state, `setup-pair:${action.id}`, () =>
+    settlementPairScoreUncached(state, action));
 }
 
 export const setupSettlementPairScore = settlementPairScore;
@@ -2456,7 +2507,7 @@ function discardBoardValue(state: GameState, action: Action): number {
   return score;
 }
 
-export function heuristicScore(state: GameState, action: Action): number {
+function heuristicScoreUncached(state: GameState, action: Action): number {
   const us = action.player;
   const me = player(state, us);
   let s = 0;
@@ -3210,6 +3261,11 @@ export function heuristicScore(state: GameState, action: Action): number {
   s += profileBias(state, action);
   if (visibleVP(state, us) >= 11) s += action.type.startsWith("BUILD") ? 8 : 0;
   return s;
+}
+
+export function heuristicScore(state: GameState, action: Action): number {
+  return doctrineMemo(state, `heuristic:${action.id}`, () =>
+    heuristicScoreUncached(state, action));
 }
 
 export const OPERATION_RULES = `Pick the legal operation that most increases P(we reach the VP target before any opponent).
