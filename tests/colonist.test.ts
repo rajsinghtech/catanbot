@@ -5,7 +5,7 @@ import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
 import { applyAction, cloneState, newGame, legalActions, roadLength, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
-import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, openingResourceResilience, roadBuildingHasStrategicProof, roadExpansionScore, roadMaterialsSupportedAfterAction, roadOpenSettlementTarget, roadReservesExpansionLane, settlementPairScore, settlementRouteAfterRoad, settlementRouteHasResourceSupport } from "../src/policy/doctrine.ts";
+import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, openingResourceResilience, roadBuildingHasStrategicProof, roadExpansionScore, roadMaterialsSupportedAfterAction, roadOpenSettlementTarget, roadOpensSupportedEndgameHouse, roadReservesExpansionLane, settlementPairScore, settlementRouteAfterRoad, settlementRouteHasResourceSupport } from "../src/policy/doctrine.ts";
 import { decide } from "../src/policy/jev.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
@@ -749,6 +749,46 @@ test("a third expansion road can claim a valuable settlement lane before the hou
     const rec = await decide(state);
     assert.equal(rec.action.type, "BUILD_ROAD");
     assert.equal(rec.action.edge, lane.action.edge);
+  } finally {
+    if (previousOffline === undefined) delete process.env.JEV_OFFLINE;
+    else process.env.JEV_OFFLINE = previousOffline;
+  }
+});
+
+test("a supported one-edge house route survives late-game road saturation", async () => {
+  const previousOffline = process.env.JEV_OFFLINE;
+  process.env.JEV_OFFLINE = "1";
+  try {
+    const state = newGame({ playerCount: 4 }, { seed: 1, us: "red" });
+    const me = state.players[0];
+    const start = "-1,-1|-1,0|0,-1";
+    const firstRoad = "-1,-1|-1,0|0,-1|-1,-1|0,-1|0,-2";
+    const endpoints = state.board.edges[firstRoad].vertices;
+    const remoteCities = Object.keys(state.board.vertices)
+      .filter((vertex) => vertex !== start && !endpoints.includes(vertex))
+      .slice(0, 3);
+    me.settlements = [];
+    me.cities = [start, ...remoteCities]; // 8 visible VP, no expansion anchor left.
+    // Inert identities model a long network already spent elsewhere; the
+    // live candidate remains the only route that opens this isolated spot.
+    me.roads = [firstRoad, ...Array.from({ length: 7 }, (_, i) => `prior-road-${i}`)];
+    me.hand = { wood: 1, brick: 2, sheep: 1, wheat: 0, ore: 0 };
+    state.current = me.id;
+    state.phase = "turn";
+    state.turn = 100;
+
+    const road = legalActions(state)
+      .filter((action) => action.type === "BUILD_ROAD")
+      .find((action) => roadOpensSupportedEndgameHouse(state, action));
+    const endTurn = legalActions(state).find((action) => action.type === "END_TURN");
+    assert.ok(road, "fixture should have a supported, direct, uncontested new house spot");
+    assert.ok(endTurn);
+    assert.equal(roadReservesExpansionLane(state, road), false, "ordinary lane reservation is intentionally capped at seven roads");
+    assert.ok(heuristicScore(state, road) > heuristicScore(state, endTurn));
+
+    const rec = await decide(state);
+    assert.equal(rec.action.type, "BUILD_ROAD");
+    assert.equal(rec.action.edge, road.edge);
   } finally {
     if (previousOffline === undefined) delete process.env.JEV_OFFLINE;
     else process.env.JEV_OFFLINE = previousOffline;

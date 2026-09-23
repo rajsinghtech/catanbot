@@ -984,6 +984,33 @@ export function roadOpenSettlementTarget(
 }
 
 /**
+ * Near the finish, a road that creates the *first* reachable house spot can
+ * still be the right conversion even after a long network is built. The
+ * ordinary expansion guard intentionally gets conservative at 7+ roads;
+ * that must not strand a player who has no reachable house, is one or two
+ * points short, and can fund the newly opened spot from hand/production.
+ */
+export function roadOpensSupportedEndgameHouse(state: GameState, action: Action): boolean {
+  return doctrineMemo(state, `endgame-house-road:${action.id}:${action.edge ?? ""}`, () => {
+    if (action.type !== "BUILD_ROAD" || state.phase !== "turn" || !action.edge) return false;
+    const me = player(state, action.player);
+    if (totalVP(state, action.player) < state.config.victoryPoints - 2) return false;
+    if (me.settlements.length >= 5 || me.settlements.length + me.cities.length >= 9) return false;
+    // A reachable house/city is already the direct conversion; save the road
+    // cards for it instead of expanding a second lane.
+    if (settlementSpots(state, me, false).length > 0) return false;
+    if (me.settlements.length > 0 && me.cities.length < 4 && canPay(me.hand, COSTS.city)) return false;
+
+    // Depth zero means this paid edge itself reaches the spot. No speculative
+    // second/third road or replenishment promise is being used as evidence.
+    const target = roadOpenSettlementTarget(state, action, 0);
+    if (target.depth !== 0 || target.value < 45 || target.contested) return false;
+    if (roadExpansionScore(state, action) < 24) return false;
+    return settlementResourcesSupportedAfterAction(state, action);
+  });
+}
+
+/**
  * A good competitive road is sometimes a reservation, not an immediate
  * house. It claims an uncontested lane to a valuable intersection so the
  * next road/roll/trade can convert it before an opponent does. This proof is
@@ -2501,8 +2528,9 @@ export function heuristicScore(state: GameState, action: Action): number {
         const cityPayableNow = canPay(me.hand, COSTS.city);
         const immediateHouseAfterRoad = settlementRouteCanPayAfterRoads(state, action, 1);
         const reservesExpansionLane = roadReservesExpansionLane(state, action);
+        const endgameHouseApproach = roadOpensSupportedEndgameHouse(state, action);
         const anchorFrontier = (preserveLastSettlement && roadValue >= 24 &&
-          (!cityPayableNow || immediateHouseAfterRoad)) || reservesExpansionLane;
+          (!cityPayableNow || immediateHouseAfterRoad)) || reservesExpansionLane || endgameHouseApproach;
         // Roads are an investment, not a default resource sink. Once the
         // player has a network of four or more, make the policy prove that
         // the next edge creates a real settlement route or a defensible LR

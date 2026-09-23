@@ -11,6 +11,7 @@ import {
   OPERATION_RULES,
   roadExpansionScore,
   roadBuildingHasStrategicProof,
+  roadOpensSupportedEndgameHouse,
   roadOpenSettlementTarget,
   roadReservesExpansionLane,
   roadMaterialsSupportedAfterAction,
@@ -426,6 +427,7 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
     // sacrificed for it.
     return true;
   }
+  if (roadOpensSupportedEndgameHouse(state, action)) return true;
   const me = state.players.find((player) => player.id === action.player);
   const buildingCount = (me?.settlements.length ?? 0) + (me?.cities.length ?? 0);
   const roadCount = me?.roads.length ?? 0;
