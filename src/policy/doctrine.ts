@@ -613,6 +613,46 @@ function settlementResourcesSupported(state: GameState, id: string): boolean {
   });
 }
 
+export function settlementResourcesSupportedAfterAction(state: GameState, action: Action): boolean {
+  try {
+    const after = cloneState(state);
+    applyAction(after, action, () => 0.5);
+    return settlementResourcesSupported(after, action.player);
+  } catch {
+    return false;
+  }
+}
+
+export function roadMaterialsSupportedAfterAction(state: GameState, action: Action): boolean {
+  const me = player(state, action.player);
+  const prod = production(state, action.player);
+  const postRoadHand = { ...me.hand };
+  if (action.type === "BUILD_ROAD" && state.phase !== "road_building") {
+    postRoadHand.wood -= COSTS.road.wood;
+    postRoadHand.brick -= COSTS.road.brick;
+  }
+  const ownedPorts = [...me.settlements, ...me.cities]
+    .map((vertex) => state.board.vertices[vertex]?.port)
+    .filter((port): port is NonNullable<typeof port> => Boolean(port));
+  const canReplenishRoadResource = (resource: "wood" | "brick"): boolean => {
+    if (postRoadHand[resource] > 0 || prod[resource] > 0) return true;
+    if (ownedPorts.some((port) =>
+      port.ratio === 2 && port.resource && port.resource !== resource &&
+      (postRoadHand[port.resource] >= 2 || prod[port.resource] > 0),
+    )) return true;
+    if (ownedPorts.some((port) => port.ratio === 3 && !port.resource) &&
+      RESOURCES.some((source) => source !== resource && (postRoadHand[source] >= 3 || prod[source] > 0))) {
+      return true;
+    }
+    // The ordinary 4:1 bank rate remains a fallback only for a real surplus
+    // in hand or a very strong production stream; a weak single-resource
+    // engine should not pretend it can fund a multi-road expansion.
+    return RESOURCES.some((source) => source !== resource &&
+      (postRoadHand[source] >= 4 || prod[source] >= 8));
+  };
+  return canReplenishRoadResource("wood") && canReplenishRoadResource("brick");
+}
+
 export function settlementRouteHasResourceSupport(
   state: GameState,
   action: Action,
@@ -989,24 +1029,19 @@ export function roadReservesExpansionLane(state: GameState, action: Action): boo
     // There must be an actual bounded route, not just a valuable vertex in a
     // graph search. Resource support may come from current production/ports;
     // it need not mean the settlement is payable this exact turn.
-    const routeValue = openTarget.depth === 0
-      ? openTarget.value
-      : openTarget.depth === 1
-        ? settlementRouteAfterTwoRoads(state, action)
-        : settlementRouteAfterThreeRoads(state, action);
-    const routeSupported = openTarget.depth === 0 ||
-      settlementRouteHasResourceSupport(state, action, Math.min(3, openTarget.depth + 1));
-    if (routeValue < 45 && !routeSupported) return false;
+    const routeSupported = settlementRouteHasResourceSupport(state, action, Math.min(3, openTarget.depth + 1)) ||
+      // The path search above proves this exact road advances to a real open
+      // house target. When the current hand runs out of wood/brick after this
+      // edge, the legal-action simulator cannot buy the next approach road
+      // immediately; production and an owned port can still support that
+      // later conversion over several turns.
+      settlementResourcesSupportedAfterAction(state, action);
+    if (!routeSupported) return false;
 
-    // Reserve a lane only when the road cards can plausibly be replenished.
-    // Production is deliberately enough here: this is a plan over several
-    // turns, not a claim that the whole route is already in hand.
-    const prod = production(state, action.player);
-    const roadSupply = me.hand.wood + me.hand.brick >= 3 ||
-      prod.wood + prod.brick > 0 ||
-      (me.hand.wood >= 1 && prod.brick > 0) ||
-      (me.hand.brick >= 1 && prod.wood > 0);
-    if (!roadSupply) return false;
+    // If this edge reaches the settlement itself, there is no second road to
+    // fund. Otherwise both road materials need a plausible replenishment path;
+    // wood-only or brick-only production cannot bankroll an open-ended route.
+    if (openTarget.depth > 0 && !roadMaterialsSupportedAfterAction(state, action)) return false;
 
     // If an opponent is already one visible conversion from winning, a
     // multi-road reservation is too slow. Immediate denial/award logic still

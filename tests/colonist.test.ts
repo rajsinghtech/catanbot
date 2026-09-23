@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { applyLogEvent } from "../src/colonist/apply.ts";
 import { parseLogLine } from "../src/colonist/log.ts";
 import { buildBoardFromColonistHexes } from "../src/engine/colonist_board.ts";
-import { applyAction, newGame, legalActions, roadLength, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
+import { applyAction, cloneState, newGame, legalActions, roadLength, roadSpots, totalVP, visibleVP } from "../src/engine/game.ts";
 import { production } from "../src/engine/features.ts";
-import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, openingResourceResilience, roadBuildingHasStrategicProof, roadExpansionScore, roadOpenSettlementTarget, roadReservesExpansionLane, settlementPairScore, settlementRouteAfterRoad } from "../src/policy/doctrine.ts";
+import { boundedSecureLongestRoadRace, forcedWin, heuristicScore, longestRoadPlanScore, openingResourceResilience, roadBuildingHasStrategicProof, roadExpansionScore, roadMaterialsSupportedAfterAction, roadOpenSettlementTarget, roadReservesExpansionLane, settlementPairScore, settlementRouteAfterRoad, settlementRouteHasResourceSupport } from "../src/policy/doctrine.ts";
 import { decide } from "../src/policy/jev.ts";
 
 function event(text: string, icons: string[] = [], extra: Record<string, unknown> = {}) {
@@ -991,6 +991,8 @@ test("an unsecured Longest Road race does not justify a road before a house is p
   assert.ok(road);
   assert.ok(endTurn);
   const plan = longestRoadPlanScore(state, road);
+  assert.equal(roadMaterialsSupportedAfterAction(state, road), false);
+  assert.equal(roadReservesExpansionLane(state, road), false);
   assert.equal(plan.claimNow, false);
   assert.equal(plan.secureNow, false);
   assert.equal(plan.claimSoon, true);
@@ -1058,10 +1060,10 @@ test("a city can anchor an expansion road toward a useful port", () => {
     "0,-1|0,-2|1,-2|0,-2|1,-2|1,-3",
     "0,-2|0,-3|1,-3|0,-2|1,-2|1,-3",
   ];
-  // The owned wood harbor can trade two wood for the missing ore. The open
-  // generic-harbor corner ahead produces wheat, so settling there adds both
-  // a trade outlet and a useful resource stream.
-  me.hand = { wood: 3, brick: 3, sheep: 1, wheat: 1, ore: 0 };
+  // This road spends the last wood/brick pair. The next approach road must
+  // wait for production, while the house is supported by the wood harbor and
+  // resource engine. The open generic-harbor corner adds a useful wheat stream.
+  me.hand = { wood: 1, brick: 1, sheep: 0, wheat: 2, ore: 0 };
   state.phase = "turn";
   state.current = me.id;
 
@@ -1071,12 +1073,24 @@ test("a city can anchor an expansion road toward a useful port", () => {
     action.type === "BUILD_ROAD" && action.edge === "-1,-2|0,-2|0,-3|0,-2|0,-3|1,-3",
   );
   assert.ok(road);
+  assert.equal(settlementRouteHasResourceSupport(state, road, 2), false);
   const target = roadOpenSettlementTarget(state, road, 3);
   assert.equal(target.contested, false);
   assert.ok(target.value >= 45, `valuable port route scored only ${target.value}`);
   assert.ok(target.depth <= 2);
+  assert.equal(roadMaterialsSupportedAfterAction(state, road), true);
   assert.equal(roadReservesExpansionLane(state, road), true);
   assert.ok(heuristicScore(state, road) > heuristicScore(state, legalActions(state).find((action) => action.type === "END_TURN")!));
+
+  const withoutPort = cloneState(state);
+  delete withoutPort.board.vertices[port.id].port;
+  const sameRoadWithoutPort = legalActions(withoutPort).find((action) =>
+    action.type === "BUILD_ROAD" && action.edge === road.edge,
+  );
+  assert.ok(sameRoadWithoutPort);
+  const noPortTarget = roadOpenSettlementTarget(withoutPort, sameRoadWithoutPort, 3);
+  assert.ok(target.value > noPortTarget.value + 10);
+  assert.equal(roadReservesExpansionLane(withoutPort, sameRoadWithoutPort), false);
 });
 
 test("a payable reachable house still beats an unplanned expansion road", () => {

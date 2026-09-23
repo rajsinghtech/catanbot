@@ -13,7 +13,9 @@ import {
   roadBuildingHasStrategicProof,
   roadOpenSettlementTarget,
   roadReservesExpansionLane,
+  roadMaterialsSupportedAfterAction,
   settlementPairScore,
+  settlementResourcesSupportedAfterAction,
   settlementRouteAfterRoad,
   settlementRouteAfterTwoRoads,
   settlementRouteAfterThreeRoads,
@@ -434,7 +436,9 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
     (me?.settlements.length ?? 0) < 5
   );
   const openTarget = roadOpenSettlementTarget(state, action, 3);
-  const expansionCardsCanReplenish = Boolean(me && (me.hand.wood >= 2 || me.hand.brick >= 2));
+  const openTargetRouteSupported = openTarget.value >= 45 && openTarget.depth <= 2 &&
+    settlementResourcesSupportedAfterAction(state, action);
+  const expansionCardsCanReplenish = openTarget.depth === 0 || roadMaterialsSupportedAfterAction(state, action);
   const quickRoadScore = roadExpansionScore(state, action);
   const openTargetApproach = expansionPhase &&
     roadCount < 5 &&
@@ -444,6 +448,7 @@ function roadHasStrategicProof(state: GameState, action: Action): boolean {
     (!openTarget.contested || openTarget.depth === 0 || quickRoadScore >= 45) &&
     !cityPayableNow &&
     gap <= 4 &&
+    openTargetRouteSupported &&
     expansionCardsCanReplenish;
   if (openTargetApproach) {
     // A candidate can be the right first edge even when the next road cards
