@@ -1104,8 +1104,21 @@ function roadBuildingFirstScore(state: GameState, action: Action): number {
   } catch {
     return firstScore;
   }
-  const secondActions = legalActions(first).filter((candidate) => candidate.type === "BUILD_ROAD");
-  if (!secondActions.length) return firstScore - 12;
+  // `BUILD_ROAD` is also legal as a paid action after the second free road.
+  // Only treat it as the pair's continuation while the engine still says the
+  // Road Building phase is active; otherwise the planner quietly evaluates a
+  // free-road plan plus an unrelated paid third road.
+  const secondActions = first.phase === "road_building"
+    ? legalActions(first).filter((candidate) => candidate.type === "BUILD_ROAD")
+    : [];
+  if (!secondActions.length) {
+    // When the first road used the card's last placement (or exhausted the
+    // road supply), still score its completed conversion. In particular,
+    // don't turn the second placement into a greedy frontier choice: the
+    // first placement was selected as part of a pair, so the final edge must
+    // be judged by the house/award the completed plan actually enables.
+    return firstScore + roadBuildingPairScore(first, action.player, firstScore) * 0.72;
+  }
 
   let bestPair = -Infinity;
   for (const second of secondActions) {
@@ -1116,24 +1129,30 @@ function roadBuildingFirstScore(state: GameState, action: Action): number {
       continue;
     }
     const secondScore = roadExpansionScore(first, second);
-    const us = player(afterPair, action.player);
-    const house = bestReachableSettlementValue(afterPair, action.player);
-    const settlementMissing = costDistance(us.hand, COSTS.settlement);
-    let pair = secondScore;
-    if (house > 0) {
-      // A reachable house is the purpose of expansion.  Reward a pair that
-      // can pay it now much more than a generic frontier extension.
-      pair += 48 + house * 0.42;
-      if (settlementMissing <= 1) pair += 22;
-      if (canPay(us.hand, COSTS.settlement)) pair += 46;
-    } else {
-      // Keep Longest Road/territory pairs available, but do not let an
-      // unconnected two-edge branch outrank a route that reaches a house.
-      pair -= 14;
-    }
+    const pair = roadBuildingPairScore(afterPair, action.player, secondScore);
     if (pair > bestPair) bestPair = pair;
   }
   return firstScore + (Number.isFinite(bestPair) ? bestPair * 0.72 : -12);
+}
+
+/** Score the state after the final free road, shared by both placement steps. */
+function roadBuildingPairScore(afterPair: GameState, usId: string, finalRoadScore: number): number {
+  const us = player(afterPair, usId);
+  const house = bestReachableSettlementValue(afterPair, usId);
+  const settlementMissing = costDistance(us.hand, COSTS.settlement);
+  let score = finalRoadScore;
+  if (house > 0) {
+    // A reachable house is the purpose of expansion. Reward a pair that can
+    // pay it now much more than a generic frontier extension.
+    score += 48 + house * 0.42;
+    if (settlementMissing <= 1) score += 22;
+    if (canPay(us.hand, COSTS.settlement)) score += 46;
+  } else {
+    // Keep Longest Road/territory pairs available, but do not let an
+    // unconnected two-edge branch outrank a route that reaches a house.
+    score -= 14;
+  }
+  return score;
 }
 
 /**
@@ -1507,15 +1526,16 @@ function roadBuildingValue(state: GameState, us: string): number {
   applyAction(sim, bestFirst.action, () => 0.5);
   const second = legalActions(sim)
     .filter((action) => action.type === "BUILD_ROAD")
-    .map((action) => roadExpansionScore(sim, action))
-    .sort((a, b) => b - a)[0] ?? 0;
+    .map((action) => ({ action, score: roadBuildingFirstScore(sim, action) }))
+    .sort((a, b) => b.score - a.score)[0];
+  if (second) applyAction(sim, second.action, () => 0.5);
   const house = bestReachableSettlementValue(sim, us);
   // `roadBuildingHasStrategicProof` also admits a supported, uncontested
   // settlement lane created by the complete pair. Do not reapply a first-road
   // payable-house test here: that made the proof pass while the card's value
   // was still scored as if the pair had no conversion.
   const award = longestRoadPlanScore(state, bestFirst.action);
-  return bestFirst.score + second * 0.72 + (house > 0 ? house * 0.34 : -8) + award.value * 0.65;
+  return bestFirst.score + (house > 0 ? house * 0.34 : -8) + award.value * 0.65;
 }
 
 function yearOfPlentyActionValue(state: GameState, action: Action): number {

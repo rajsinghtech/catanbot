@@ -893,6 +893,38 @@ test("Road Building proof accepts an immediate secure bridge award", () => {
   assert.equal(roadBuildingHasStrategicProof(state), true);
 });
 
+test("Road Building's second free road follows the settlement route instead of the greedy frontier", () => {
+  const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
+  const me = state.players[0];
+  const start = "0,-1|0,-2|1,-2";
+  const firstRoad = "0,-1|0,-2|1,-2|0,-2|1,-2|1,-3";
+  const secondRoad = "0,-2|0,-3|1,-3|0,-2|1,-2|1,-3";
+  const houseRoad = "-1,-2|0,-2|0,-3|0,-2|0,-3|1,-3";
+  const greedyFrontier = "-1,-1|0,-1|0,-2|0,-1|0,-2|1,-2";
+  me.settlements = [start];
+  me.roads = [firstRoad, secondRoad];
+  me.hand = { wood: 1, brick: 1, sheep: 1, wheat: 1, ore: 0 };
+  state.phase = "road_building";
+  state.pendingRoads = 1;
+  state.current = me.id;
+
+  const candidates = legalActions(state).filter((action) => action.type === "BUILD_ROAD");
+  const houseAction = candidates.find((action) => action.edge === houseRoad);
+  const frontierAction = candidates.find((action) => action.edge === greedyFrontier);
+  assert.ok(houseAction);
+  assert.ok(frontierAction);
+
+  const completed = applyAction(cloneState(state), houseAction, () => 0.5);
+  assert.ok(legalActions(completed).some((action) =>
+    action.type === "BUILD_SETTLEMENT" && action.vertex === "-1,-2|0,-2|0,-3",
+  ));
+  const offRoute = applyAction(cloneState(state), frontierAction, () => 0.5);
+  assert.ok(!legalActions(offRoute).some((action) =>
+    action.type === "BUILD_SETTLEMENT" && action.vertex === "-1,-2|0,-2|0,-3",
+  ));
+  assert.ok(heuristicScore(state, houseAction) > heuristicScore(state, frontierAction));
+});
+
 test("forced-win search finds a two-road Longest Road win from Road Building", () => {
   const state = newGame({ playerCount: 4 }, { seed: 23, us: "red" });
   const me = state.players[0];
